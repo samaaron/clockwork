@@ -108,3 +108,62 @@ test("while there is no instance the client's send is refused with the word, a w
   expect(r.workerReason).toBe("no instance");
   expect(r.refused).toEqual(["no instance"]);
 });
+
+/*
+ * A message the ring has no room for now, or could never take, is refused with the word, as one sent while there is
+ * no instance is: a worker's channel says why, and the client hears /clockwork/error, as a native transport's sender
+ * does (ClockworkEngine::ingest). The audio is suspended so nothing drains and the ring fills.
+ */
+test("a send the ring has no room for is refused as ring full, and one larger than it always takes as too big", async ({ page, clockworkConfig, clockworkMode }) => {
+  test.skip(clockworkMode === "postMessage", "the boundary is the ring writer, which only SAB mode has");
+  await boot(page);
+  const r = await page.evaluate(async (config) => {
+    const { OscChannel } = await import(`${location.origin}/js/lib/osc_channel.js`);
+    const osc = window.Clockwork.osc;
+    const cw = new window.Clockwork({ ...config });
+    await cw.init();
+    const heard = [];
+    cw.on("in:osc", ({ oscData }) => { try { heard.push(osc.decode(oscData)); } catch { /* a bundle */ } });
+    const { transferable } = cw.createOscChannel();
+    const worker = await OscChannel.fromTransferable(transferable);
+    const refused = [];
+    worker.onRefused = (bytes, reason) => refused.push(reason);
+
+    // An OSC message of exactly `total` bytes: "/x", a blob filling the rest.
+    const messageOfBytes = (total) => {
+      const m = new Uint8Array(total);
+      m.set([0x2f, 0x78, 0, 0, 0x2c, 0x62, 0, 0]);
+      new DataView(m.buffer).setUint32(8, total - 12, false);
+      return m;
+    };
+    const ring = transferable.bufferConstants.IN_RING_SIZE;
+
+    await cw.audioContext.suspend();
+    let sent = 0;
+    while (sent < 64 && worker.send(messageOfBytes(ring / 4))) sent++;
+    // and the rest of it, with messages the size of the client's ping, so that does not fit either
+    const ping = osc.encodeMessage("/dummy/ping", []);
+    for (let i = 0; i < 100000 && worker.send(ping); i++);
+    const fullReason = worker.lastRefusal;
+    cw.send("/dummy/ping");                                          // the client's own door, the ring still full
+    // Half the ring less a frame's 16-byte header is the most it always takes (ring.js ringMaxMessage): 4 bytes more.
+    const tooBigSent = worker.send(messageOfBytes(ring / 2 - 16 + 4));
+    const tooBigReason = worker.lastRefusal;
+    await cw.audioContext.resume();
+
+    const deadline = performance.now() + 5000;
+    while (!heard.some((m) => m[0] === "/clockwork/error") && performance.now() < deadline)
+      await new Promise((res) => setTimeout(res, 20));
+    worker.close();
+    await cw.destroy();
+    return { sent, fullReason, tooBigSent, tooBigReason, refused, refusal: heard.find((m) => m[0] === "/clockwork/error")?.slice(0, 3) ?? null };
+  }, clockworkConfig);
+  expect(r.sent, "a few large messages filled the ring").toBeGreaterThan(0);
+  expect(r.sent).toBeLessThan(64);
+  expect(r.fullReason).toBe("ring full");
+  expect(r.refusal, "the client heard the refusal with the address and the reason").toEqual(["/clockwork/error", "/dummy/ping", "ring full"]);
+  expect(r.tooBigSent).toBe(false);
+  expect(r.tooBigReason).toBe("too big");
+  expect(r.refused.at(-1)).toBe("too big");
+  expect(new Set(r.refused)).toEqual(new Set(["ring full", "too big"]));
+});

@@ -8,7 +8,7 @@
 
 import { createTransport, OscChannel } from "./lib/transport/index.js";
 import { readTimetag, getCurrentNTPFromPerformance } from "./lib/osc_classifier.js";
-import { clockworkSys, oscAddress, REASON_NO_INSTANCE } from "./lib/clockwork_sys.js";
+import { clockworkSys, oscAddress, REASON_NO_INSTANCE, REASON_RING_FULL, REASON_TOO_BIG } from "./lib/clockwork_sys.js";
 import { HostFront } from "./lib/host_front.js";
 
 export { OscChannel };
@@ -28,6 +28,7 @@ import { CopyReader, readCopy, encodeWants, COPY_PART, COPY_SOURCE } from "./lib
 import { readArena, regionBytes, readGeneration, instanceGeneration, REGION, REGION_NAMES } from "./lib/arena.js";
 import { ParamsReader, readParams } from "./lib/params.js";
 import { ringCursorsReader } from "./lib/ring_cursors_reader.js";
+import { ringMaxMessage } from "./lib/ring.js";
 import { IN_WRITE_LOCK } from "./lib/ring_cursor_offsets.js";
 import { IN_BUFFER_USED_BYTES, OUT_BUFFER_USED_BYTES, NRT_OUT_BUFFER_USED_BYTES, IN_BUFFER_PEAK_BYTES, OUT_BUFFER_PEAK_BYTES, NRT_OUT_BUFFER_PEAK_BYTES, CTX_IN_BUFFER_CAPACITY, CTX_OUT_BUFFER_CAPACITY, CTX_NRT_OUT_BUFFER_CAPACITY } from "./lib/metrics_offsets.js";
 import * as oscFast from "./lib/osc_fast.js";
@@ -2821,13 +2822,13 @@ export class Clockwork {
   }
 
   #sendPreparedOSC(preparedData) {
-    // A message larger than the IN ring can never be delivered — fail loudly
-    // rather than dropping it silently in the ring writer.
+    // A message larger than the IN ring always takes may never be delivered — fail loudly
+    // rather than dropping it silently in the ring writer (ring.js ringMaxMessage).
     const bc = this.#metricsReader?.bufferConstants;
     const maxSize = bc?.IN_RING_SIZE;
-    if (maxSize && preparedData.length > maxSize - 16 /* Message header */) {
+    if (maxSize && preparedData.length > ringMaxMessage(maxSize)) {
       throw new Error(
-        `OSC message too large to send (${preparedData.length} > ${maxSize - 16} bytes)`
+        `OSC message too large to send (${preparedData.length} > ${ringMaxMessage(maxSize)} bytes)`
       );
     }
 
@@ -2836,18 +2837,20 @@ export class Clockwork {
     // A SAB write that loses the lock race / hits a full ring is dropped and
     // counted as ringBufferDirectWriteFails (no fallback) — not silent.
     //
-    // A message for the guest while there is no guest is refused at the
-    // boundary, and the client hears the refusal the way it hears every
-    // other: /clockwork/error with the address and the reason, on the same
-    // path as the engine's replies (docs/RESTARTS.md). The word is
-    // "wait for /clockwork/setup", so a listener re-sends then.
-    if (!this.#oscChannel.send(preparedData)
-        && this.#oscChannel.lastRefusal === REASON_NO_INSTANCE) {
-      this.#deliverInbound(
-        oscFast.copyEncoded(oscFast.encodeMessage(clockworkSys("error"),
-                                                  [oscAddress(preparedData), REASON_NO_INSTANCE,
-                                                   { type: "int", value: this.#instanceGeneration() }])),
-        -1, performance.now());
+    // A message the boundary refuses — no guest to take it, no room in the ring
+    // now, or larger than the ring always takes — the client hears the way it
+    // hears every other refusal: /clockwork/error with the address and the
+    // reason, on the same path as the engine's replies (docs/RESTARTS.md), as
+    // a native transport's sender does (ClockworkEngine::ingest).
+    if (!this.#oscChannel.send(preparedData)) {
+      const reason = this.#oscChannel.lastRefusal;
+      if (reason === REASON_NO_INSTANCE || reason === REASON_RING_FULL || reason === REASON_TOO_BIG) {
+        this.#deliverInbound(
+          oscFast.copyEncoded(oscFast.encodeMessage(clockworkSys("error"),
+                                                    [oscAddress(preparedData), reason,
+                                                     { type: "int", value: this.#instanceGeneration() }])),
+          -1, performance.now());
+      }
     }
   }
 

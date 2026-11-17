@@ -77,3 +77,11 @@ export function answersWithoutGuest(bytes) {
  *  <generation>, the generation the guest instance's at that moment
  *  (docs/RESTARTS.md). */
 export const REASON_NO_INSTANCE = "no instance";
+
+/** The reason a message is refused with when the ring it was sent into has no room now (CLOCKWORK_REFUSED_FULL):
+ *  the ring drains every block, so the sender sends it again later. */
+export const REASON_RING_FULL = "ring full";
+
+/** The reason a message is refused with when it is larger than the ring always takes (CLOCKWORK_REFUSED_TOO_BIG,
+ *  ring.js ringMaxMessage): sending it again will not help. */
+export const REASON_TOO_BIG = "too big";

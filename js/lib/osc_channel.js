@@ -1,16 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
 // Copyright (c) 2025 Sam Aaron
 
-import { engineRings, ringWrite } from './ring.js';
+import { engineRings, ringMaxMessage, ringWrite } from './ring.js';
 import * as MetricsOffsets from './metrics_offsets.js';
 import { calculateInControlIndices } from './ring_cursor_offsets.js';
 import { generationView, hasInstance } from './arena.js';
 import { sampleClockReader } from './sample_clock.js';
-import { answersWithoutGuest, REASON_NO_INSTANCE } from './clockwork_sys.js';
+import { answersWithoutGuest, REASON_NO_INSTANCE, REASON_RING_FULL, REASON_TOO_BIG } from './clockwork_sys.js';
 
-/** What a refused send says (`lastRefusal`): the ring had no room. Transient:
- *  the ring drains every block, so the sender sends again. */
-export const REASON_RING_FULL = "ring full";
+// What a refused send says (`lastRefusal`): the words are clockwork_sys.js's, as the C's are clockwork_sys.h's.
+export { REASON_RING_FULL, REASON_TOO_BIG };
 
 // postMessage mode: how far past the audio thread's last word on the time the channel will count by the wall clock.
 // It says so every few blocks while it renders (the worklet's CLOCK_POST_BLOCKS); past this without a word, it has
@@ -239,6 +238,8 @@ export class OscChannel {
             && !answersWithoutGuest(bytes)) {
             return this.#refuse(bytes, REASON_NO_INSTANCE);
         }
+        // Larger than the ring always takes: refused now rather than as full for good (ring.js ringMaxMessage).
+        if (bytes.length > ringMaxMessage(this.#ingress.bytes.length)) return this.#refuse(bytes, REASON_TOO_BIG);
         const success = ringWrite(this.#ingress, bytes, this.#sourceId);
         if (success) {
             this.#recordSend(oscData.length);
@@ -258,7 +259,7 @@ export class OscChannel {
         return false;
     }
 
-    /** Why the last send was refused (REASON_NO_INSTANCE, REASON_RING_FULL), or null when it was written. */
+    /** Why the last send was refused (REASON_NO_INSTANCE, REASON_RING_FULL, REASON_TOO_BIG), or null when it was written. */
     get lastRefusal() { return this.#lastRefusal; }
 
     /** The owner's refusal callback: called with the bytes that were not

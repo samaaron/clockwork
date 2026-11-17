@@ -117,6 +117,13 @@ export function engineRings(buffer, arenaBase, constants) {
  * @param {number}     sourceId  the sending channel's id, written as the message's token
  * @returns {boolean} false when it does not fit; the ring is then unchanged
  */
+/** The largest message a ring of `size` bytes always takes when it is empty, wherever its writer is: half the ring,
+ *  less a frame's header, because frames never wrap round the end (src/ring/ring.h ring_max_message). A larger one
+ *  can stay unwritable in an empty ring for good, so a sender refuses it as too big rather than as full. */
+export function ringMaxMessage(size) {
+    return size / 2 - HEADER_BYTES;
+}
+
 export function ringWrite(ring, payload, sourceId = 0) {
     const { bytes, view, words } = ring;
     const size = bytes.length;

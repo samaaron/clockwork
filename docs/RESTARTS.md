@@ -243,6 +243,16 @@ waiting on, so these are the rules a client may rely on:
    it never needs to know what the message meant. A client reads every one
    as "wait for `/clockwork/setup`", never as an error to show.
 
+   Two more reasons have the same shape but nothing to do with restarts:
+   `ring full` (no room in the ring the message was sent into, now: send it
+   again later) and `too big` (larger than that ring always takes, half of
+   it less a frame's header: sending it again will not help). A relay that
+   passes on its asker's messages says them to that asker, and the web's
+   channel to its client. The engine's own ingest only counts them
+   (`messages_dropped`): a flooding sender's refusals would crowd its real
+   answers out of the egress ring (test/test_ingest_overload.cpp). Neither
+   means "wait for `/clockwork/setup`".
+
    The boundary is the same function for every writer
    (src/in_ring_door.h), and what it reads is the generation word's
    parity, under the ring's writer lock: odd from the start of
