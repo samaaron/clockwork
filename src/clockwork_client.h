@@ -236,6 +236,13 @@ typedef struct ClockworkClientInfo {
     uint32_t block_frames;
     uint32_t input_channels;
     uint32_t output_channels;
+
+    /* How many bytes the ring this handle sends into holds, and the largest single message it always takes, wherever
+     * its write position is: half the ring, less a frame's 16-byte header, because frames never wrap round the end of
+     * the ring. A larger message is refused as CLOCKWORK_E_TOO_BIG. A client sending a lot at once sizes its bursts by
+     * send_ring_bytes. Both 0 for a reader, which cannot send. */
+    uint32_t send_ring_bytes;
+    uint32_t max_message_bytes;
 } ClockworkClientInfo;
 
 /* Feature bits. A client asks rather than assumes: an engine built for an
@@ -272,7 +279,15 @@ ClockworkCore* clockwork_client_core(const ClockworkClient* c);
  *
  * CLOCKWORK_E_FULL is a moment, not a verdict: the ring drains every block, so
  * a caller retries. CLOCKWORK_E_TOO_BIG is a verdict — the message is larger
- * than the ring can ever hold, and bulk belongs in the assets area instead.
+ * than the ring always takes (max_message_bytes in clockwork_client_info: half
+ * the ring, less a frame's header), and bulk belongs in the assets area
+ * instead. A caller sending a lot at once sizes its bursts by send_ring_bytes.
+ * A caller passing on someone else's message, one at a time for its asker,
+ * answers that asker with clockwork_sys_refuse and CLOCKWORK_REFUSED_FULL or
+ * CLOCKWORK_REFUSED_TOO_BIG (clockwork_sys.h) rather than dropping it with
+ * nothing said. The engine's own ingest does not: a flooding sender's
+ * refusals would crowd its answers out of the egress ring, so it counts the
+ * drop in the metrics (messages_dropped) instead.
  */
 ClockworkStatus clockwork_client_send(ClockworkClient* c,
                                       const uint8_t* osc, uint32_t bytes,

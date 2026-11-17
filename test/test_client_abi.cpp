@@ -16,6 +16,7 @@
 #include "EngineFixture.h"
 #include "clockwork_client.h"
 #include "params/clockwork_params.h"
+#include "ring/ring.h"           // Message: the ring frame's header
 #include "lanes/lanes.h"
 #include "shared_memory.h"
 #include "shm_tap_stream.hpp"
@@ -47,7 +48,72 @@ ClockworkClient* openInProcess(const Engine& e, ClockworkStatus* st) {
     return clockwork_client_open_memory(arenaBase(e), clockwork::kDefaultLayout.arena_bytes, st);
 }
 
+// An OSC message of exactly `total` bytes (a multiple of 4, at least 12): "/x", a blob filling the rest.
+osc_test::Packet messageOfBytes(uint32_t total) {
+    const std::vector<uint8_t> blob(total - 12, 0);   // "/x\0\0" ",b\0\0" and the blob's size word are 12 bytes
+    auto p = osc_test::messageWithBlob("/x", blob.data(), blob.size());
+    REQUIRE(p.size() == total);
+    return p;
+}
+
 } // namespace
+
+// Frames never wrap round the end of the ring. With the ring empty and its write position halfway round, a frame
+// longer than half the ring fits neither before the end nor at the front, so it would be refused as full forever,
+// and the caller is told to retry. Such a message is refused as too big instead, at once. Half the ring, header
+// included, always fits an empty ring, wherever its write position is.
+TEST_CASE("client abi: a message longer than half the ring is refused as too big, not as full forever",
+          "[client][abi]") {
+    Engine e;
+    ClockworkStatus st = CLOCKWORK_E_ARG;
+    ClockworkClient* c = openInProcess(e, &st);
+    REQUIRE(st == CLOCKWORK_OK);
+    const uint32_t ring = clockwork::kDefaultLayout.profile.in_ring_bytes;
+    const uint32_t header = sizeof(Message);
+    RingCursors* const cursors = clockwork::cursors_in(arenaBase(e), clockwork::kDefaultLayout);
+
+    // Half the ring, header and all, from the start; once the engine has read it the ring is empty and the write
+    // position is halfway round.
+    const auto half = messageOfBytes(ring / 2 - header);
+    REQUIRE(cursors->in_head.load() == 0);
+    REQUIRE(clockwork_client_send(c, half.ptr(), half.size(), 0) == CLOCKWORK_OK);
+    for (int i = 0; i < 4 && cursors->in_tail.load() != cursors->in_head.load(); ++i) e.engine.pumpAudioBlock();
+    REQUIRE(cursors->in_tail.load() == cursors->in_head.load());
+    REQUIRE(cursors->in_head.load() == static_cast<int32_t>(ring / 2));
+
+    // Four bytes more than half could never go in here, empty as the ring is. Half still does.
+    const auto over = messageOfBytes(ring / 2 - header + 4);
+    CHECK(clockwork_client_send(c, over.ptr(), over.size(), 0) == CLOCKWORK_E_TOO_BIG);
+    CHECK(clockwork_client_send(c, half.ptr(), half.size(), 0) == CLOCKWORK_OK);
+    for (int i = 0; i < 4 && cursors->in_tail.load() != cursors->in_head.load(); ++i) e.engine.pumpAudioBlock();
+
+    clockwork_client_close(c);
+}
+
+// A client sending a lot at once (a folder of definitions, say) sizes its bursts by the ring it sends into, and
+// keeps each message under the largest that ring always takes. The info says both, and the send door agrees.
+TEST_CASE("client abi: info says how much the send ring holds and the largest message it always takes",
+          "[client][abi]") {
+    Engine e;
+    ClockworkStatus st = CLOCKWORK_E_ARG;
+    ClockworkClient* c = openInProcess(e, &st);
+    REQUIRE(st == CLOCKWORK_OK);
+
+    ClockworkClientInfo info{};
+    info.struct_bytes = sizeof(info);
+    REQUIRE(clockwork_client_info(c, &info) == CLOCKWORK_OK);
+    const uint32_t ring = clockwork::kDefaultLayout.profile.in_ring_bytes;
+    CHECK(info.send_ring_bytes == ring);
+    CHECK(info.max_message_bytes == ring / 2 - sizeof(Message));
+
+    const auto largest = messageOfBytes(info.max_message_bytes);
+    CHECK(clockwork_client_send(c, largest.ptr(), largest.size(), 0) == CLOCKWORK_OK);
+    const auto over = messageOfBytes(info.max_message_bytes + 4);
+    CHECK(clockwork_client_send(c, over.ptr(), over.size(), 0) == CLOCKWORK_E_TOO_BIG);
+    for (int i = 0; i < 4; ++i) e.engine.pumpAudioBlock();
+
+    clockwork_client_close(c);
+}
 
 TEST_CASE("client abi: a message sent through the boundary reaches the guest",
           "[client][abi]") {

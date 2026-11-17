@@ -78,7 +78,7 @@ fn every_struct_is_the_header_s_size_and_every_field_is_at_the_header_s_offset()
     });
     expect!(mine, ClockworkClientInfo {
         struct_bytes, abi_version, engine_version, features, sample_rate, block_frames,
-        input_channels, output_channels,
+        input_channels, output_channels, send_ring_bytes, max_message_bytes,
     });
     expect!(mine, ClockworkClientMessage { bytes, length, token, sequence });
     expect!(mine, ClockworkRegion { base, bytes, writable });

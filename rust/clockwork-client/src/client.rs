@@ -207,6 +207,8 @@ impl Client {
             block_frames: raw.block_frames,
             input_channels: raw.input_channels,
             output_channels: raw.output_channels,
+            send_ring_bytes: raw.send_ring_bytes,
+            max_message_bytes: raw.max_message_bytes,
         })
     }
 
@@ -563,6 +565,10 @@ pub struct Info {
     pub block_frames: u32,
     pub input_channels: u32,
     pub output_channels: u32,
+    /// How many bytes the ring this client sends into holds; a client sending a lot at once sizes its bursts by it.
+    pub send_ring_bytes: u32,
+    /// The largest single message that ring always takes; a larger one is refused as [`Error::TooBig`].
+    pub max_message_bytes: u32,
 }
 
 // ── Receiving ──────────────────────────────────────────────────────────────

@@ -379,6 +379,14 @@ ClockworkStatus clockwork_client_info(ClockworkClient* handle, ClockworkClientIn
     v.block_frames    = pm->audio_block_size.load(std::memory_order_relaxed);
     v.output_channels = pm->audio_output_channels.load(std::memory_order_relaxed);
     v.input_channels  = pm->audio_input_channels.load(std::memory_order_relaxed);
+    // The ring this handle sends into, and the largest message it always takes (ring.h). A reader sends nothing.
+    if (!c->reader()) {
+        v.send_ring_bytes = c->L.in_ring_size;
+#if !defined(__EMSCRIPTEN__)
+        if (c->plane()) v.send_ring_bytes = SHM_PEER_CMD_RING_SIZE;
+#endif
+        v.max_message_bytes = ring_max_message(v.send_ring_bytes);
+    }
     const size_t n = out->struct_bytes < sizeof(v) ? out->struct_bytes : sizeof(v);
     std::memcpy(out, &v, n);
     return CLOCKWORK_OK;
@@ -393,9 +401,9 @@ ClockworkStatus clockwork_client_send(ClockworkClient* handle,
 #if !defined(__EMSCRIPTEN__)
     // The peer's road: the plane's command ring, which the engine's control
     // pass drains into the same door every other sender meets. A frame that
-    // cannot fit an empty ring will never fit.
+    // an empty ring may not take, wherever its writer is, could wait for good (ring.h).
     if (ShmPeerPlaneHeader* plane = c->plane()) {
-        if (bytes + sizeof(Message) > SHM_PEER_CMD_RING_SIZE) return CLOCKWORK_E_TOO_BIG;
+        if (bytes > ring_max_message(SHM_PEER_CMD_RING_SIZE)) return CLOCKWORK_E_TOO_BIG;
         if (!RingBufferWriter::write(shm_peer_cmd_ring(plane), SHM_PEER_CMD_RING_SIZE,
                                      &plane->cmd_head, &plane->cmd_tail,
                                      &plane->cmd_sequence, &plane->cmd_write_lock,
@@ -406,9 +414,9 @@ ClockworkStatus clockwork_client_send(ClockworkClient* handle,
     }
 #endif
 
-    // A frame that cannot fit an empty ring will never fit: say so once rather
-    // than let a caller retry forever.
-    if (bytes + sizeof(Message) > c->L.in_ring_size) return CLOCKWORK_E_TOO_BIG;
+    // A frame that an empty ring may not take, wherever its writer is, could
+    // wait for good: say so once rather than let a caller retry forever (ring.h).
+    if (bytes > ring_max_message(c->L.in_ring_size)) return CLOCKWORK_E_TOO_BIG;
 
     // A control verb of clockwork's, while the engine serves the control
     // ring: written there, where no audio block is between it and its
@@ -436,6 +444,7 @@ ClockworkStatus clockwork_client_send(ClockworkClient* handle,
                           c->control(), osc, bytes, token)) {
         case InRingWrite::Written:    return CLOCKWORK_OK;
         case InRingWrite::NoInstance: return CLOCKWORK_E_NO_INSTANCE;
+        case InRingWrite::TooBig:     return CLOCKWORK_E_TOO_BIG;
         case InRingWrite::Full:       break;
     }
     return CLOCKWORK_E_FULL;
@@ -457,7 +466,7 @@ uint8_t* clockwork_client_send_begin(ClockworkClient* handle, uint32_t max_bytes
 
 #if !defined(__EMSCRIPTEN__)
     if (ShmPeerPlaneHeader* plane = c->plane()) {
-        if (max_bytes + sizeof(Message) > SHM_PEER_CMD_RING_SIZE) return fail(CLOCKWORK_E_TOO_BIG);
+        if (max_bytes > ring_max_message(SHM_PEER_CMD_RING_SIZE)) return fail(CLOCKWORK_E_TOO_BIG);
         c->pending = RingBufferWriter::reserve(
             shm_peer_cmd_ring(plane), SHM_PEER_CMD_RING_SIZE,
             &plane->cmd_head, &plane->cmd_tail, &plane->cmd_write_lock, max_bytes);
@@ -467,7 +476,7 @@ uint8_t* clockwork_client_send_begin(ClockworkClient* handle, uint32_t max_bytes
     }
 #endif
 
-    if (max_bytes + sizeof(Message) > c->L.in_ring_size)
+    if (max_bytes > ring_max_message(c->L.in_ring_size))
         return fail(CLOCKWORK_E_TOO_BIG);
 
     c->pending = RingBufferWriter::reserve(

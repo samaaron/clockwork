@@ -1112,6 +1112,16 @@ void ClockworkEngine::initEngine(const Config& cfg) {
                         return ClockworkDrainVerdict::Retain;   // IN ring full — retry next wake
                     case InRingWrite::NoInstance:
                         return ClockworkDrainVerdict::Consume;  // refused at the door, once: done with
+                    case InRingWrite::TooBig:
+                        // Larger than the IN ring always takes (a profile whose IN ring is smaller than the
+                        // peer's): retried, it could wait for good. Refused to the peer once there is room to say so.
+                        if (!clockwork_egress_nrt_room(mCore, 1024) || !peerAnswerRoom(mCore, plane, 1024))
+                            return ClockworkDrainVerdict::Retain;
+                        clockwork_sys_refuse(d, n, CLOCKWORK_REFUSED_TOO_BIG, arenaInstanceGeneration(clockwork_lanes_base(mCore)),
+                            [core = mCore, token](const uint8_t* r, uint32_t rn) {
+                                clockwork_egress_nrt_write(core, token, r, rn);
+                            });
+                        return ClockworkDrainVerdict::Consume;
                     case InRingWrite::Written:
                         break;
                 }
@@ -1833,6 +1843,10 @@ ClockworkStatus ClockworkEngine::ingest(const uint8_t* data, uint32_t size, uint
     // standard refusal, so a transport's peer and an in-process caller get
     // the same reply as a sender on the lanes ABI does (docs/RESTARTS.md).
     // The status is returned too, for a caller that reads statuses.
+    // A full ring or a message too big for it is NOT refused here, only
+    // counted: a flooding sender would have its refusals crowd its real
+    // answers out of the egress ring (test_ingest_overload.cpp), so it reads
+    // its drops in the metrics instead (messages_dropped).
     if (status == CLOCKWORK_E_NO_INSTANCE)
         mEgress.refuse(originToken, data, size, CLOCKWORK_REFUSED_NO_INSTANCE);
     return status;

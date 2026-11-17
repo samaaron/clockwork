@@ -31,13 +31,14 @@ inline bool in_ring_takes(const void* arena, const uint8_t* osc, uint32_t len) {
     return arenaHasInstance(arena) || clockwork_sys_answers_without_guest(osc, len);
 }
 
-enum class InRingWrite { Written, Full, NoInstance };
+enum class InRingWrite { Written, Full, TooBig, NoInstance };
 
 // Write one message into the in ring of the arena at `arena`, whose ring is
 // `ring_size` bytes at `ring`, as `token`, if the ring takes it.
 inline InRingWrite in_ring_write(const void* arena, uint8_t* ring, uint32_t ring_size,
                                  RingCursors* c, const uint8_t* osc, uint32_t len,
                                  uint32_t token) {
+    if (len > ring_max_message(ring_size)) return InRingWrite::TooBig;   // could stay unwritable for good (ring.h)
     const auto r = RingBufferWriter::reserve(ring, ring_size, &c->in_head, &c->in_tail,
                                              &c->in_write_lock, len);
     if (!r.valid())

@@ -148,6 +148,14 @@ inline constexpr const char* CLOCKWORK_REFUSED_NO_INSTANCE = "no instance";
 inline constexpr const char* CLOCKWORK_REFUSED_REBUILDING  = "rebuilding";
 inline constexpr const char* CLOCKWORK_REFUSED_STALLED     = "stalled";
 
+// The reason a message is refused with when the ring it was sent into has no room for it now. Not an error to show:
+// the ring drains every block, so the sender sends it again later. The web's channel says the same words
+// (js/lib/osc_channel.js REASON_RING_FULL).
+inline constexpr const char* CLOCKWORK_REFUSED_FULL = "ring full";
+// And when it is larger than that ring always takes (ring.h ring_max_message): sending it again will not help. Bulk
+// belongs in the assets area.
+inline constexpr const char* CLOCKWORK_REFUSED_TOO_BIG = "too big";
+
 // The reason the timed store's verbs are refused with in a build that has none.
 inline constexpr const char* CLOCKWORK_SCHEDULER_ABSENT =
     "this build has no timed store (CLOCKWORK_SCHEDULER=OFF)";

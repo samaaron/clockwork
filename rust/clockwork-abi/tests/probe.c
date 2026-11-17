@@ -60,6 +60,7 @@ int main(void) {
     F(ClockworkClientInfo, engine_version); F(ClockworkClientInfo, features);
     F(ClockworkClientInfo, sample_rate); F(ClockworkClientInfo, block_frames);
     F(ClockworkClientInfo, input_channels); F(ClockworkClientInfo, output_channels);
+    F(ClockworkClientInfo, send_ring_bytes); F(ClockworkClientInfo, max_message_bytes);
 
     S(ClockworkClientMessage);
     F(ClockworkClientMessage, bytes); F(ClockworkClientMessage, length);

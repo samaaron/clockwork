@@ -54,5 +54,13 @@ inline bool ring_fits(uint32_t head, uint32_t tail, uint32_t size, uint32_t foot
     return footprint <= front;
 }
 
+// The largest message a ring of `size` bytes always takes when it is empty, wherever its writer is. Frames never wrap,
+// so with the writer halfway round, the room before the end and the room at the front are each half the ring. A
+// larger message can stay unwritable in an empty ring for good, so a writer refuses it as too big rather than as
+// full. `size` is a multiple of 16 (shared_memory.h), so half of it is a multiple of 4: no alignment to round.
+inline uint32_t ring_max_message(uint32_t size) {
+    return size / 2 - static_cast<uint32_t>(sizeof(Message));
+}
+
 constexpr uint32_t MESSAGE_MAGIC = 0xDEADBEEF;
 constexpr uint32_t PADDING_MAGIC = 0xBADDCAFE;  // end-of-ring pad marker; frame restarts at offset 0

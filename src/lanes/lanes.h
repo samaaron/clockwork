@@ -85,7 +85,8 @@ extern "C" {
  * nanoseconds — but a writer preempted mid-write stalls every other
  * producer, audio thread included, until it is rescheduled. Returns false
  * when the ring is full (backpressure: the caller decides whether to
- * drop, retry, or count it).
+ * drop, retry, or count it), and when the message is larger than the ring
+ * always takes (ring.h ring_max_message), which a retry will not change.
  *
  * token is an opaque writer/token carried in the Message header
  * and surfaced on egress for reply routing. Web: 0 = main thread, 1+ =

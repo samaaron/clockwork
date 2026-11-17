@@ -57,6 +57,10 @@ pub struct ClockworkClientInfo {
     pub block_frames: u32,
     pub input_channels: u32,
     pub output_channels: u32,
+    /// How many bytes the ring this handle sends into holds; 0 for a reader.
+    pub send_ring_bytes: u32,
+    /// The largest single message that ring always takes (half of it, less a frame's header); 0 for a reader.
+    pub max_message_bytes: u32,
 }
 
 pub const CLOCKWORK_FEATURE_TAPS: u32 = 1 << 0;
