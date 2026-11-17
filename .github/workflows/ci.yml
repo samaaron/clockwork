@@ -6,6 +6,9 @@
 #   linux-x64, linux-arm64, linux-x86 (i686, in a 32-bit container),
 #   macos-arm64, macos-x64, windows-x64.
 #
+# On a Mac every check is a step of the native job, not a job of its own
+# (the native job says why). Linux and Windows run them as jobs.
+#
 # fail-fast is off so one platform's failure does not hide the others,
 # `--parallel 2` for the test builds (hosted runners run out of memory above
 # that), and bash on every runner so the Windows steps share the Unix ones.
@@ -50,22 +53,18 @@ jobs:
   # scripts/globals.list, which says what it is (docs/ENGINES.md, Part 4.3).
   # The check reads an unoptimised build's objects, and its canary proves it
   # read them, on macOS and Linux: each adds its own files (CoreAudio; ALSA,
-  # JACK, PipeWire), and the list names a platform's own with `only=`. The
-  # scan reads COFF too; Windows joins once the runner has a demangler
-  # (scripts/check-globals.sh needs c++filt or CXXFILT).
+  # JACK, PipeWire), and the list names a platform's own with `only=`. macOS
+  # runs it in the native job's macos-arm64 row. The scan reads COFF too;
+  # Windows joins once the runner has a demangler (scripts/check-globals.sh
+  # needs c++filt or CXXFILT).
   globals-guard:
-    name: globals guard (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    name: globals guard (ubuntu-24.04)
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest, ubuntu-24.04]
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install dependencies (Linux)
-        if: runner.os == 'Linux'
+      - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential cmake pkg-config \
@@ -89,24 +88,17 @@ jobs:
   # clang-tidy over Clockwork's own sources (.clang-tidy: the crash classes
   # the engine has had, and the shapes that rule them out), as a list per
   # platform: Linux sees the shared code and the ALSA, JACK and PipeWire
-  # paths, macOS the CoreAudio and Cocoa ones. Windows's own branches are
-  # not analysed yet (clang-tidy driving clang-cl is its own job). The
-  # counts per check go in the job summary and the whole log is an artifact.
-  # What fails the job is .clang-tidy's WarningsAsErrors, nothing else.
+  # paths, macOS the CoreAudio and Cocoa ones (the native job's macos-arm64
+  # row). Windows's own branches are not analysed yet (clang-tidy driving
+  # clang-cl is its own job). The counts per check go in the job summary and
+  # the whole log is an artifact. What fails the job is .clang-tidy's
+  # WarningsAsErrors, nothing else (scripts/ci-tidy.sh).
   tidy:
-    name: tidy (${{ matrix.platform }})
-    runs-on: ${{ matrix.os }}
+    name: tidy (linux-x64)
+    # ubuntu-24.04, not -latest: apt.llvm.org does not serve the 26.04 image
+    # yet.
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # ubuntu-24.04, not -latest: apt.llvm.org does not serve the 26.04
-          # image yet.
-          - os: ubuntu-24.04
-            platform: linux-x64
-          - os: macos-latest
-            platform: macos-arm64
     steps:
       - uses: actions/checkout@v6
 
@@ -118,10 +110,9 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: cargo-${{ matrix.platform }}-${{ hashFiles('rust/Cargo.lock') }}
+          key: cargo-linux-x64-${{ hashFiles('rust/Cargo.lock') }}
 
-      - name: Install dependencies (Linux)
-        if: runner.os == 'Linux'
+      - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential cmake pkg-config \
@@ -133,10 +124,6 @@ jobs:
           sudo apt-get install -y clang-tidy-20
           echo "CLANG_TIDY=/usr/bin/clang-tidy-20" >> "$GITHUB_ENV"
 
-      - name: Install clang-tidy (macOS)
-        if: runner.os == 'macOS'
-        run: brew install llvm
-
       # The library target alone: tidy needs the compile database and the
       # generated headers, not the tests.
       - name: Configure and build the library
@@ -147,56 +134,35 @@ jobs:
           cmake --build build --target clockwork --parallel 2
 
       - name: clang-tidy
-        shell: bash
-        run: |
-          set +e
-          scripts/tidy.sh build > tidy.log 2> tidy.err
-          rc=$?
-          set -e
-          {
-            echo "## clang-tidy (${{ matrix.platform }})"
-            echo
-            echo "| count | check |"
-            echo "|------:|-------|"
-            # grep exits 1 when there is nothing to find, which with pipefail
-            # would fail the job for being at zero; an empty table is the aim.
-            { grep -o '\[[a-z]*-[a-z0-9.-]*\]$' tidy.log || true; } | sort | uniq -c | sort -rn \
-              | awk '{ printf "| %s | %s |\n", $1, $2 }'
-            echo
-            echo "$(grep -c 'warning:' tidy.log || true) warnings, $(grep -c 'clang-diagnostic-error' tidy.log || true) files not compiled by clang-tidy"
-            echo
-            # The script's own account of the run: files analysed of files
-            # asked for, the canary, and what was suppressed outside our
-            # sources — an empty table above is only clean if this line says
-            # every file was looked at.
-            grep '^tidy:' tidy.log || echo "tidy.sh gave no account of the run (exit $rc)"
-          } >> "$GITHUB_STEP_SUMMARY"
-          # 2: no compile database or clang-tidy; 3: the canary reported
-          # nothing; 4: not every file was analysed. Each means the run is
-          # not evidence of anything, and the job must say so.
-          if [ "$rc" -ge 2 ]; then
-            echo "tidy.sh exit $rc:"; cat tidy.err | tail -20
-            exit "$rc"
-          fi
-          # Only what .clang-tidy says is an error fails the job.
-          if grep -q '\[-warnings-as-errors\]' tidy.log; then
-            grep -B1 '\[-warnings-as-errors\]' tidy.log | head -40
-            exit 1
-          fi
+        run: scripts/ci-tidy.sh build linux-x64
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: tidy-${{ matrix.platform }}
+          name: tidy-linux-x64
           path: |
             tidy.log
             tidy.err
 
   # ---------------------------------------------------------------- native --
+  #
+  # On a Mac this job is every check, one step after another: the NIF, Rust,
+  # clang-tidy, the globals guard and the iOS drivers, which Linux and
+  # Windows run as jobs of their own. macOS runners are the scarce ones: the
+  # account runs only a few at once, and GitHub's arm64 pool is sometimes
+  # short. As ten jobs, the later ones queued 20 minutes and more behind the
+  # earlier ones, and on a short day GitHub gave up on some before they
+  # started (2026-11-17: tidy and the iOS drivers, "not acquired by Runner of
+  # type hosted"). Each of those steps runs even when a step before it
+  # failed (!cancelled()), so one failure does not hide another, and the job
+  # still fails. The macOS tsan run stays a job of its own: an instrumented
+  # build and a nightly Rust share nothing with this one.
   native:
-    name: native (${{ matrix.platform }})
+    name: ${{ matrix.name || format('native ({0})', matrix.platform) }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    # 60, not 45: the Intel Mac's row is the native build and tests and then
+    # the Rust workspace's, about 30 minutes in all.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -205,19 +171,27 @@ jobs:
             platform: linux-x64
           - os: ubuntu-24.04-arm
             platform: linux-arm64
+          # The NIF is built with the rest, and the compile database is
+          # written for clang-tidy.
           - os: macos-latest
             platform: macos-arm64
+            name: macos (arm64)
+            configure: -DCLOCKWORK_NIF=ON -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
           # macos-26-intel, not macos-15-intel: the macOS 15 image defaults
           # to Xcode 16.4, whose libc++ has no std::jthread (CMakeLists.txt
           # says so at configure). macOS 26 carries Xcode 26.6, as macos-latest.
           - os: macos-26-intel
             platform: macos-x64
+            name: macos (x64)
+            configure: -DCLOCKWORK_NIF=ON
           - os: windows-latest
             platform: windows-x64
     steps:
       - uses: actions/checkout@v6
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -226,6 +200,13 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
           key: cargo-${{ matrix.platform }}-${{ hashFiles('rust/Cargo.lock') }}
+
+      # The Rust workspace's target directory, for the macOS rows' Rust steps
+      # below (the rust job keeps the same cache for the other platforms).
+      - uses: Swatinem/rust-cache@v2
+        if: runner.os == 'macOS'
+        with:
+          workspaces: rust
 
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
@@ -238,9 +219,10 @@ jobs:
       - name: Configure
         shell: bash
         run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON -DCLOCKWORK_WERROR=ON
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON -DCLOCKWORK_WERROR=ON ${{ matrix.configure }}
 
       - name: Build
+        id: build
         run: cmake --build build --config Release --parallel 2
 
       # The suite runs twice, because each way sees what the other cannot.
@@ -306,6 +288,50 @@ jobs:
         if: matrix.platform == 'linux-x64'
         run: scripts/check-samples.sh
 
+      # The Mac's other checks (above: why they are steps here). The nif,
+      # rust, tidy, globals guard and drivers jobs say what each one is for.
+      - name: The NIF exports nif_init and nothing else
+        if: ${{ !cancelled() && runner.os == 'macOS' && steps.build.outcome == 'success' }}
+        run: scripts/check-exports.sh build/clockwork.so nif_init
+
+      - name: Clippy
+        if: ${{ !cancelled() && runner.os == 'macOS' }}
+        run: scripts/ci-rust.sh clippy
+
+      - name: Rust tests
+        if: ${{ !cancelled() && runner.os == 'macOS' }}
+        run: scripts/ci-rust.sh test
+
+      # Against this job's own build: the same sources and Release flags the
+      # tidy job's library build has, with the tests' as well, which tidy
+      # does not read (scripts/tidy.sh names the files).
+      - name: Install clang-tidy
+        if: ${{ !cancelled() && matrix.platform == 'macos-arm64' && steps.build.outcome == 'success' }}
+        run: brew install llvm
+
+      - name: clang-tidy
+        if: ${{ !cancelled() && matrix.platform == 'macos-arm64' && steps.build.outcome == 'success' }}
+        run: scripts/ci-tidy.sh build macos-arm64
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && matrix.platform == 'macos-arm64' && steps.build.outcome == 'success' }}
+        with:
+          name: tidy-macos-arm64
+          path: |
+            tidy.log
+            tidy.err
+
+      - name: Every mutable variable is on the list
+        if: ${{ !cancelled() && matrix.platform == 'macos-arm64' }}
+        run: scripts/check-globals.sh
+
+      - name: Compile the iOS drivers
+        if: ${{ !cancelled() && matrix.platform == 'macos-arm64' }}
+        shell: bash
+        run: |
+          scripts/check-drivers.sh build-drivers | tee drivers.log
+          grep -q "check-drivers: 2 target(s) built" drivers.log
+
   # ------------------------------------------------- linux-x86 (i686, 32-bit) --
   # Also where the Rust workspace's i686 tests run: it links ALSA and libudev,
   # which the container has as native i386 packages and an x86_64 runner does
@@ -330,26 +356,16 @@ jobs:
 
   # ---------------------------------------------------------------- drivers --
   # Compile Smoothie's iOS, Android and Bela drivers (scripts/check-drivers.sh).
-  # Build only: none of them can run on a runner.
+  # Build only: none of them can run on a runner. The iOS ones are compiled in
+  # the native job's macos-arm64 row.
   drivers:
-    name: drivers (${{ matrix.name }})
-    runs-on: ${{ matrix.os }}
+    name: drivers (bela)
+    runs-on: ubuntu-latest
     timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-latest
-            name: ios
-            targets: 2
-          - os: ubuntu-latest
-            name: bela
-            targets: 1
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install dependencies (Linux)
-        if: runner.os == 'Linux'
+      - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential cmake libasound2-dev libjack-jackd2-dev
@@ -357,11 +373,11 @@ jobs:
       - name: Compile the drivers
         shell: bash
         run: |
-          # The Ubuntu image carries an NDK; hidden so the Linux row builds
-          # Bela. The Android driver is not ported to the audited core yet.
+          # The Ubuntu image carries an NDK; hidden so this builds Bela. The
+          # Android driver is not ported to the audited core yet.
           unset ANDROID_NDK_ROOT ANDROID_NDK_LATEST_HOME
           scripts/check-drivers.sh build-drivers | tee drivers.log
-          grep -q "check-drivers: ${{ matrix.targets }} target(s) built" drivers.log
+          grep -q "check-drivers: 1 target(s) built" drivers.log
 
   # ---------------------------------------------------------- configurations --
   # The build options the native matrix leaves at their defaults.
@@ -502,7 +518,7 @@ jobs:
 
   # -------------------------------------------------------------------- nif --
   # The Erlang NIF build. Build-only: clockwork vendors the erl_nif headers,
-  # so this needs no BEAM on the runner.
+  # so this needs no BEAM on the runner. The Macs build it in the native job.
   nif:
     name: nif (${{ matrix.platform }})
     runs-on: ${{ matrix.os }}
@@ -515,10 +531,6 @@ jobs:
             platform: linux-x64
           - os: ubuntu-24.04-arm
             platform: linux-arm64
-          - os: macos-latest
-            platform: macos-arm64
-          - os: macos-26-intel
-            platform: macos-x64
           - os: windows-latest
             platform: windows-x64
     steps:
@@ -542,12 +554,12 @@ jobs:
         run: scripts/check-exports.sh build/clockwork.so nif_init
 
   # ------------------------------------------------------------------- rust --
+  # The Macs run these in the native job (scripts/ci-rust.sh).
   rust:
     name: rust (${{ matrix.platform }})
     runs-on: ${{ matrix.os }}
-    # 45, not 30: clippy and the release tests are two full builds, and the
-    # Intel macOS runner can take over 30 minutes for them. The target cache
-    # below keeps the usual run well under it.
+    # 45, not 30: clippy and the release tests are two full builds. The
+    # target cache below keeps the usual run well under it.
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -557,10 +569,6 @@ jobs:
             platform: linux-x64
           - os: ubuntu-24.04-arm
             platform: linux-arm64
-          - os: macos-latest
-            platform: macos-arm64
-          - os: macos-26-intel
-            platform: macos-x64
           - os: windows-latest
             platform: windows-x64
     steps:
@@ -593,7 +601,8 @@ jobs:
       # on this runner, and clippy triggers it too (--all-targets checks the
       # build script's consumers); the packages above are what it needs.
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --manifest-path rust/Cargo.toml -- -D warnings
+        shell: bash
+        run: scripts/ci-rust.sh clippy
       # Every extern "C" function is the panic fence alone, so no panic
       # reaches a host (docs/ENGINES.md, 3.7). Read from the sources, which
       # are the same on every runner: once is enough.
@@ -602,7 +611,8 @@ jobs:
         shell: bash
         run: scripts/check-ffi.sh
       - name: Test
-        run: cargo test --release --manifest-path rust/Cargo.toml
+        shell: bash
+        run: scripts/ci-rust.sh test
 
   # ------------------------------------------------------------------ msrv --
   # The oldest Rust the crates must build with: 1.85, Debian trixie's rustc,

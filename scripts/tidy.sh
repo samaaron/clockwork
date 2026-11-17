@@ -27,10 +27,15 @@ TIDY="${CLANG_TIDY:-$(command -v clang-tidy || true)}"
 [ -z "$TIDY" ] && [ -x /opt/homebrew/opt/llvm/bin/clang-tidy ] && TIDY=/opt/homebrew/opt/llvm/bin/clang-tidy
 [ -z "$TIDY" ] && { echo "clang-tidy not found (brew install llvm)" >&2; exit 2; }
 
-EXTRA=()
+# -Wno-error: a build configured with CLOCKWORK_WERROR (CI's native job) has
+# -Werror in every compile command, and a warning from this clang-tidy's own
+# clang, which may not be the compiler the build used, would then stop the
+# file being analysed at all. What fails a run is .clang-tidy's
+# WarningsAsErrors.
+EXTRA=(--extra-arg=-Wno-error)
 if [ "$(uname)" = Darwin ]; then
     SDK="$(xcrun --show-sdk-path)"
-    EXTRA=(--extra-arg=-isysroot --extra-arg="$SDK"
+    EXTRA+=(--extra-arg=-isysroot --extra-arg="$SDK"
            --extra-arg=-stdlib=libc++ --extra-arg=-nostdinc++
            --extra-arg=-isystem --extra-arg="$SDK/usr/include/c++/v1")
 fi
