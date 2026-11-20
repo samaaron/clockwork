@@ -332,6 +332,17 @@ bool clockwork_event_route(void* routeCtx, const void* callCtx,
 // and the verb goes on as clockwork_host_forward_route sends it.
 bool clockwork_wants_route(void* routeCtx, const void* callCtx,
                            const uint8_t* data, std::size_t len);
+// "/clockwork/midi/out/…" and "/clockwork/midi/ports/list" (and "get") on a
+// host with no control thread that supplies MIDI ports of its own (lanes.h,
+// clockwork_host_midi_ports). A short send to its port out is kept for the
+// host with its frame in this block; the port list is answered with its
+// ports. Anything else, and everything on a host with no port of its own,
+// goes on as clockwork_host_forward_route sends it. Defined in
+// audio_processor.cpp.
+bool clockwork_host_midi_out_route(void* routeCtx, const void* callCtx,
+                                   const uint8_t* data, std::size_t len);
+bool clockwork_host_midi_ports_route(void* routeCtx, const void* callCtx,
+                                     const uint8_t* data, std::size_t len);
 // "/clockwork/asset/…": the hand-off of a committed assets slot to the guest
 // (dsp_api.h, "Assets"). Registered on the audio thread of every host, since
 // the guest is only ever reached from there.

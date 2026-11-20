@@ -187,6 +187,54 @@ ClockworkStatus clockwork_embed_meter(ClockworkEmbed* h, int32_t num, int32_t de
 ClockworkStatus clockwork_embed_playing(ClockworkEmbed* h, int playing, uint32_t frame);
 ClockworkStatus clockwork_embed_beat(ClockworkEmbed* h, double beat, uint32_t how, uint32_t frame);
 
+/* A host with MIDI of its own (a DAW handing a plugin its events) supplies
+ * the ports: one in and one out, named once after attach and before the
+ * first render (NULL for none; at most 63 bytes, not empty). They are ports
+ * like a device's: in the port list ("/clockwork/midi/ports/list"), an event
+ * from one indistinguishable from a device's, a send to one named as any
+ * port is. E_ARG, and nothing named: a booted handle (its ports are the
+ * devices'), or a name no port could have.
+ *
+ * IN. One whole channel message (2 or 3 bytes, status first) for `frame`,
+ * counted from the first frame of the next render, said before that render
+ * from the thread that calls it, as the transport is. It reaches the client
+ * that asked for MIDI ("/clockwork/midi/notify/subscribe"), and a guest that
+ * asked for events, as "/clockwork/midi/in/<kind> <port> <channel>
+ * <values…> <when>", with `when` the time of that frame whatever the host's
+ * buffers and the engine's block. It is sent on by the engine's next block,
+ * so it arrives up to a block after its frame, as input audio does. No
+ * allocation, no lock. E_ARG, and nothing handed in: no port in, or bytes
+ * that are not one channel message (system exclusive is not carried).
+ * E_FULL: more than the engine holds between blocks (256), counted.
+ *
+ * OUT. A client's send to the port ("/clockwork/midi/out/<kind> <port>
+ * <channel> <values…>", the port by its name or "*"), in a bundle for the
+ * time it should sound, is held to that time by the engine. After each
+ * render, clockwork_embed_midi_out copies out what came due in it, in the
+ * order of their times, each with its frame counted from that render's
+ * first: up to `capacity`, the number copied, and those are then gone; call
+ * again for more. A send whose time had passed comes out at the first frame
+ * it can, and is counted late. More than is kept (256 a block, 1024 not yet
+ * asked for) is dropped, and counted. What a host does not ask for stays,
+ * and comes out at frame 0 of the render it next asks after. No allocation,
+ * no lock. */
+typedef struct ClockworkEmbedMidi {
+    uint32_t frame;      /* from the first frame of the render just done */
+    uint8_t  bytes[3];
+    uint8_t  length;
+} ClockworkEmbedMidi;
+typedef struct ClockworkEmbedMidiStats {
+    uint32_t struct_bytes;  /* sizeof(ClockworkEmbedMidiStats), for later fields */
+    uint64_t in_dropped;    /* handed in with the store full */
+    uint64_t out_dropped;   /* sent with the store full */
+    uint64_t out_late;      /* sent for a time that had passed */
+} ClockworkEmbedMidiStats;
+ClockworkStatus clockwork_embed_midi_ports(ClockworkEmbed* h, const char* in, const char* out);
+ClockworkStatus clockwork_embed_midi_in(ClockworkEmbed* h, const uint8_t* bytes, uint32_t length, uint32_t frame);
+uint32_t        clockwork_embed_midi_out(ClockworkEmbed* h, ClockworkEmbedMidi* events, uint32_t capacity);
+/* E_ARG for a booted handle or a struct too small to fill. */
+ClockworkStatus clockwork_embed_midi_stats(const ClockworkEmbed* h, ClockworkEmbedMidiStats* stats);
+
 /* Release: a booted engine closes its device and shuts down; an attached
  * one detaches. The client is closed with it. */
 void clockwork_embed_close(ClockworkEmbed* h);

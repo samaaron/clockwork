@@ -519,6 +519,36 @@ struct GuestMallocs {
     std::atomic<uint32_t> frees{0};        // free calls inside any entry point
 };
 
+// A host that supplies the MIDI ports itself (lanes.h,
+// clockwork_host_midi_ports): a DAW handing a plugin its events. Its names,
+// what it has handed in and no tick has yet taken, and what the last tick
+// sent to its port. Fixed stores: nothing here is allocated after the core is
+// made. The names are set while nothing ticks; the rest is the ticking
+// thread's.
+struct HostMidi {
+    static constexpr uint32_t kNameBytes = 64;   // CLOCKWORK_MIDI_WIRE_PORT_MAX and its NUL
+    std::array<char, kNameBytes> in_port{}, out_port{};   // "" is no port
+
+    // Handed in, each for a frame of the host's count: taken, in the order
+    // handed, by the tick whose block the frame is in or the first after.
+    struct In { uint64_t frame = 0; uint8_t bytes[3] = {}; uint8_t len = 0; };
+    static constexpr uint32_t kIn = 256;
+    std::array<In, kIn> in{};
+    uint32_t in_count = 0;
+
+    // Sent to the host's port by the last tick, in the order sent, each at
+    // its frame in that tick's block. Emptied when the host takes them
+    // (clockwork_host_midi_out) and as the next tick starts.
+    static constexpr uint32_t kOut = 256;
+    std::array<ClockworkHostMidi, kOut> out{};
+    uint32_t out_count = 0;
+
+    // One writer each (the ticking thread), read by any.
+    std::atomic<uint64_t> in_dropped{0};    // handed in with the store full
+    std::atomic<uint64_t> out_dropped{0};   // sent with the store full
+    std::atomic<uint64_t> out_late{0};      // sent for a time before the block it came due in
+};
+
 struct CoreState {
     explicit CoreState(ClockworkCore* c)
         : core(c), ports(clockwork_core_ports(c)), sinks(clockwork_core_sinks(c)), heap(clockwork_core_heap(c)) {}
@@ -547,6 +577,7 @@ struct CoreState {
     Routing routing;
     Schedule schedule;
     CoreClock clock;
+    HostMidi host_midi;
     MetricsFlush metrics;
     EarlyLog early_log;
 };

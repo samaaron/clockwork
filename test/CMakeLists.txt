@@ -398,6 +398,7 @@ add_executable(clockwork_attach_tests
     test_core_gate.cpp
     test_core_profile.cpp
     test_embed.cpp
+    test_embed_midi.cpp
     test_restart_grid_embed.cpp
 )
 target_include_directories(clockwork_attach_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

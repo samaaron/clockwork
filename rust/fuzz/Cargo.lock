@@ -155,6 +155,7 @@ dependencies = [
  "clockwork-comms",
  "clockwork-gamepad",
  "clockwork-midi",
+ "clockwork-midi-wire",
  "clockwork-osc",
  "clockwork-osc-net",
  "clockwork-schedule",
@@ -197,6 +198,13 @@ dependencies = [
  "midir",
  "wasm-bindgen",
  "windows",
+]
+
+[[package]]
+name = "clockwork-midi-wire"
+version = "0.1.0"
+dependencies = [
+ "clockwork-fence",
 ]
 
 [[package]]

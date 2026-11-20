@@ -33,6 +33,7 @@ clockwork-audio-decode = { path = "../clockwork-audio-decode" }
 clockwork-comms = { path = "../clockwork-comms" }
 clockwork-osc-net = { path = "../clockwork-osc-net" }
 clockwork-midi = { path = "../clockwork-midi" }
+clockwork-midi-wire = { path = "../clockwork-midi-wire" }
 clockwork-gamepad = { path = "../clockwork-gamepad" }
 
 [[bin]]
@@ -73,6 +74,13 @@ bench = false
 [[bin]]
 name = "midi"
 path = "fuzz_targets/midi.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "midi_wire"
+path = "fuzz_targets/midi_wire.rs"
 test = false
 doc = false
 bench = false

@@ -243,6 +243,53 @@ bool clockwork_host_meter(ClockworkCore* core, int32_t num, int32_t den, uint64_
 bool clockwork_host_playing(ClockworkCore* core, bool playing, uint64_t frame);
 bool clockwork_host_beat(ClockworkCore* core, double beat, uint32_t how, uint64_t frame);
 
+/* A HOST'S OWN MIDI. A host may supply MIDI ports of its own: a DAW handing
+ * a plugin its events, a board reading a UART. It names one in and one out
+ * (either may be NULL for none; at most 63 bytes, not empty), while nothing
+ * ticks. They are ports like a device's: in the port list, an event from one
+ * indistinguishable from a device's, a send to one named as any port is.
+ *
+ * IN. clockwork_host_midi_in hands in one whole channel message (2 or 3
+ * bytes, status first) for `frame`, a frame of the host's own count of its
+ * audio, from the thread that ticks and between ticks. The tick whose block
+ * the frame is in, or the first after, sends it down the route every inbound
+ * event takes (clockwork_sys.h, clockwork_event_route), to the client if it
+ * asked for MIDI and to the guest if it asked for events, as
+ * "/clockwork/midi/in/<kind> <port> <channel> <values…> <when>" with `when`
+ * the time of that frame. No allocation, no lock. False: no port in, bytes
+ * that are not one channel message, or the store full (256 between ticks),
+ * which is counted.
+ *
+ * OUT. A send to the host's port, by its name or "*" ("/clockwork/midi/out/
+ * <kind>", clockwork_sys.h), is the host's to deliver: held to its time by
+ * the scheduler as any timed send is, then kept, in the order sent, with its
+ * frame in the block it came due in. After a tick clockwork_host_midi_out
+ * points at what that tick kept, valid until the next tick, returns how
+ * many, and takes them: asked again, there are none. What a host never asks
+ * for is gone as the next tick starts. A send for a time before its block is
+ * at frame 0, and counted late.
+ * A send with the store full (256 a tick) is dropped, and counted. Short
+ * messages only: system exclusive is not carried, and is refused as on any
+ * host with no port for it.
+ *
+ * What was handed in and not yet taken is dropped when the host's audio
+ * starts over (clockwork_audio_starts), its count of frames with it. */
+typedef struct ClockworkHostMidi {
+    uint32_t frame;      /* in the block of the tick that kept it; the block's length for
+                          * a time nearest the first frame of the next */
+    uint8_t  bytes[3];
+    uint8_t  length;
+} ClockworkHostMidi;
+typedef struct ClockworkHostMidiStats {
+    uint64_t in_dropped;    /* handed in with the store full */
+    uint64_t out_dropped;   /* sent with the store full */
+    uint64_t out_late;      /* sent for a time before the block it came due in */
+} ClockworkHostMidiStats;
+bool     clockwork_host_midi_ports(ClockworkCore* core, const char* in, const char* out);
+bool     clockwork_host_midi_in(ClockworkCore* core, const uint8_t* bytes, uint32_t length, uint64_t frame);
+uint32_t clockwork_host_midi_out(ClockworkCore* core, const ClockworkHostMidi** events);
+bool     clockwork_host_midi_stats(ClockworkCore* core, ClockworkHostMidiStats* stats);
+
 /* THE AUDIO WAS AWAY? The one rule on every target. The gap is the time that
  * passed since the last block less the audio rendered in it, by the host's
  * monotonic clock where it has one (a system clock set by hand is not a gap)

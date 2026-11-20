@@ -58,6 +58,7 @@ uint32_t lane_base_for(uint32_t device_in, uint32_t device_out) {
 #include "clockwork_ports.h"    // frames crossing the boundary, on a stable slot
 #include "clockwork_port_bus.h" // ...and which DSP channels they occupy
 #include "clockwork_event_sink.h" // events leaving clockwork, on a stable slot
+#include "midi_wire.h"            // a host's MIDI to and from its OSC form, without allocating
 #include "os_pages.h"             // a core's memory from the system, natively
 
 
@@ -1445,6 +1446,8 @@ extern "C" {
         // What a host said of its transport was for frames of the count that has just ended.
         c->host_word_count = 0;
         c->host_line = false;
+        // And the MIDI it handed in for them.
+        if (clockwork::CoreState* st = clockwork::state(core)) st->host_midi.in_count = 0;
         return audio_gap(core, wall_ntp, monotonic_secs, -1.0);
     }
 
@@ -1507,6 +1510,60 @@ extern "C" {
         said.how = how;
         said.frame = frame;
         return host_says(core, said);
+    }
+
+    // A host's own MIDI (lanes.h).
+    EMSCRIPTEN_KEEPALIVE bool clockwork_host_midi_ports(ClockworkCore* core, const char* in, const char* out) {
+        clockwork::CoreState* st = clockwork::state(core);
+        if (!st) return false;
+        // A name a port could have: not empty, and short enough to keep.
+        const auto fits = [](const char* name) {
+            const size_t n = name ? std::strlen(name) : 1;
+            return n > 0 && n < clockwork::HostMidi::kNameBytes;
+        };
+        if (!fits(in) || !fits(out)) return false;
+        clockwork::HostMidi& hm = st->host_midi;
+        hm.in_port.fill('\0');
+        hm.out_port.fill('\0');
+        if (in)  std::memcpy(hm.in_port.data(), in, std::strlen(in));
+        if (out) std::memcpy(hm.out_port.data(), out, std::strlen(out));
+        return true;
+    }
+    EMSCRIPTEN_KEEPALIVE bool clockwork_host_midi_in(ClockworkCore* core, const uint8_t* bytes, uint32_t length, uint64_t frame) {
+        clockwork::CoreState* st = clockwork::state(core);
+        if (!st || !bytes || st->host_midi.in_port[0] == '\0') return false;
+        // One whole channel message: its status, and the data bytes that status has.
+        if (length == 0 || bytes[0] < 0x80 || bytes[0] >= 0xF0) return false;
+        const uint32_t whole = (bytes[0] & 0xF0u) == 0xC0u || (bytes[0] & 0xF0u) == 0xD0u ? 2u : 3u;
+        if (length != whole) return false;
+        clockwork::HostMidi& hm = st->host_midi;
+        if (hm.in_count == clockwork::HostMidi::kIn) {
+            hm.in_dropped.store(hm.in_dropped.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+            return false;
+        }
+        clockwork::HostMidi::In& e = hm.in[hm.in_count++];
+        e.frame = frame;
+        e.len = static_cast<uint8_t>(length);
+        std::memcpy(e.bytes, bytes, length);
+        return true;
+    }
+    EMSCRIPTEN_KEEPALIVE uint32_t clockwork_host_midi_out(ClockworkCore* core, const ClockworkHostMidi** events) {
+        clockwork::CoreState* st = clockwork::state(core);
+        if (!st || !events) return 0;
+        // Taken: asked again before the next tick, there are none, so a host that asks after a tick that did
+        // not run its block is not handed the last block's again.
+        *events = st->host_midi.out.data();
+        const uint32_t n = st->host_midi.out_count;
+        st->host_midi.out_count = 0;
+        return n;
+    }
+    EMSCRIPTEN_KEEPALIVE bool clockwork_host_midi_stats(ClockworkCore* core, ClockworkHostMidiStats* stats) {
+        clockwork::CoreState* st = clockwork::state(core);
+        if (!st || !stats) return false;
+        stats->in_dropped  = st->host_midi.in_dropped.load(std::memory_order_relaxed);
+        stats->out_dropped = st->host_midi.out_dropped.load(std::memory_order_relaxed);
+        stats->out_late    = st->host_midi.out_late.load(std::memory_order_relaxed);
+        return true;
     }
 
     // The teardown's mark, exact: taken under the in ring's writer lock once
@@ -2129,8 +2186,11 @@ extern "C" {
             default_audio_routes.add("gamepad/notify/",  &clockwork_wants_route, core);
             default_audio_routes.add("osc/notify/",      &clockwork_wants_route, core);
             default_audio_routes.add("midi/in/enable",        &clockwork_host_forward_route, core);
-            default_audio_routes.add("midi/ports/list",       &clockwork_host_forward_route, core);
-            default_audio_routes.add("midi/ports/get",        &clockwork_host_forward_route, core);
+            // A host with MIDI ports of its own answers for them here; one
+            // with none goes on to the host's end of the chain, as before.
+            default_audio_routes.add("midi/ports/list",       &clockwork_host_midi_ports_route, core);
+            default_audio_routes.add("midi/ports/get",        &clockwork_host_midi_ports_route, core);
+            default_audio_routes.add("midi/out/",             &clockwork_host_midi_out_route, core);
             default_audio_routes.add("gamepad/devices/list",  &clockwork_host_forward_route, core);
             default_audio_routes.add("gamepad/devices/get",   &clockwork_host_forward_route, core);
             // No NRT thread here. The end of clockwork's chain is either this
@@ -3481,6 +3541,34 @@ extern "C" {
             const auto nextOscTime    = currentOscTime + build.block_step;
             cc.block_ntp.store(currentOscTime.ntp(), std::memory_order_relaxed);
 
+            // A host with MIDI ports of its own (lanes.h): what the last
+            // block sent to its port has been read, and what it has handed
+            // in for a frame of this block, or one before it, goes down the
+            // route every inbound event takes, with the time of its frame.
+            // Before the drain, so a client's answer to a note is not ahead
+            // of the note.
+            if (clockwork::HostMidi& hm = st.host_midi; hm.in_count != 0 || hm.out_count != 0) {
+                hm.out_count = 0;
+                const double block_end = sample_pos + static_cast<double>(build.block);
+                uint32_t kept = 0;
+                for (uint32_t i = 0; i < hm.in_count; ++i) {
+                    const clockwork::HostMidi::In e = hm.in[i];
+                    const double frame = static_cast<double>(e.frame);
+                    if (frame >= block_end || !(rate > 0.0)) {
+                        hm.in[kept++] = e;
+                        continue;
+                    }
+                    const auto units = static_cast<int64_t>(std::llround((frame - sample_pos) / rate * clockwork::kNtpUnitsPerSecond));
+                    const clockwork::Timetag when = currentOscTime.plus(units);
+                    std::array<uint8_t, CLOCKWORK_MIDI_WIRE_IN_MAX> osc{};
+                    const uint32_t n = clockwork_midi_wire_in(hm.in_port.data(), e.bytes, e.len, when.ntp(),
+                                                              osc.data(), static_cast<uint32_t>(osc.size()));
+                    // A frame of a block already rendered has no place in this one: for the guest it is now.
+                    if (n) dispatch(st, osc.data(), n, 0, units >= 0 ? when : clockwork::Timetag::immediately(), currentOscTime);
+                }
+                hm.in_count = kept;
+            }
+
             ClockworkDrainStop stop = ClockworkDrainStop::Empty;
             clockwork_drain_ring(
                 base + L.in_ring_start, L.profile.in_ring_bytes,
@@ -4240,6 +4328,18 @@ bool clockwork_wants_route(void* routeCtx, const void* callCtx, const uint8_t* d
     if (kind && what) {
         if (std::strcmp(what, "/notify/subscribe") == 0) clockwork_client_wants(static_cast<ClockworkCore*>(routeCtx), kind, true);
         else if (std::strcmp(what, "/notify/unsubscribe") == 0) clockwork_client_wants(static_cast<ClockworkCore*>(routeCtx), kind, false);
+        // A host that supplies the MIDI ports itself (lanes.h) has no front to say what is there now: the core
+        // says it, the ports as a notice to the one who asked, and nothing to one who asked to hear no more.
+        clockwork::CoreState* const st = clockwork::state(static_cast<ClockworkCore*>(routeCtx));
+        if (kind == CLOCKWORK_WANTS_MIDI && st && (st->host_midi.in_port[0] != '\0' || st->host_midi.out_port[0] != '\0')) {
+            if (std::strcmp(what, "/notify/subscribe") != 0) return true;
+            const auto* cc = static_cast<const DrainCallCtx*>(callCtx);
+            std::array<uint8_t, 48 + 2 * (clockwork::HostMidi::kNameBytes + 8)> notice{};
+            const uint32_t n = clockwork_midi_wire_ports(st->host_midi.in_port.data(), st->host_midi.out_port.data(), 0,
+                                                         notice.data(), static_cast<uint32_t>(notice.size()));
+            if (n) emit_osc_out(*st, cc ? cc->token : 0, notice.data(), n);
+            return true;
+        }
     }
     return clockwork_host_forward_route(routeCtx, callCtx, data, len);
 }
@@ -4284,6 +4384,70 @@ bool clockwork_event_route(void* routeCtx, const void* callCtx,
         emit_osc_out(*st, 0, data, static_cast<uint32_t>(len));
     if (guest_wants_events())
         clockwork_dsp_default_route(routeCtx, callCtx, data, len);
+    return true;
+}
+
+// A send to the port a host supplies itself (lanes.h,
+// clockwork_host_midi_ports): kept for the host with its frame in this
+// block. The scheduler has held it to its time, so the time is in this block
+// or, for a send that came late, before it. Everything else under
+// "/clockwork/midi/out/" goes on as it did: system exclusive, a port's
+// enable, a send to a port that is not the host's.
+bool clockwork_host_midi_out_route(void* routeCtx, const void* callCtx, const uint8_t* data, std::size_t len) {
+    clockwork::CoreState* const st = clockwork::state(static_cast<ClockworkCore*>(routeCtx));
+    ClockworkMidiWireOut send{};
+    if (!st || st->host_midi.out_port[0] == '\0'
+        || !clockwork_midi_wire_out(data, static_cast<uint32_t>(len), &send)
+        || (std::strcmp(send.port, "*") != 0 && std::strcmp(send.port, st->host_midi.out_port.data()) != 0))
+        return clockwork_host_forward_route(routeCtx, callCtx, data, len);
+
+    clockwork::HostMidi& hm = st->host_midi;
+    const auto count = [](std::atomic<uint64_t>& n) { n.store(n.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed); };
+    const auto* cc = static_cast<const DrainCallCtx*>(callCtx);
+    // The send's time is its bundle's, or its own trailing timetag.
+    clockwork::Timetag when = cc ? cc->when : clockwork::Timetag::immediately();
+    if (send.when > 1) when = clockwork::Timetag::fromNtp(send.when);
+    const clockwork::Build& b = st->build;
+    uint32_t frame = 0;
+    if (cc && !when.isImmediate() && b.sample_rate > 0.0 && b.block > 0) {
+        // The nearest frame to its time. A time a hair before the next
+        // block's first frame is that frame: the block's length, here.
+        const double nearest = std::floor(when.secondsFrom(cc->blockTime) * b.sample_rate + 0.5);
+        // A trailing timetag for a later block is a time nothing here holds
+        // a send to: refused, as a host with no port for it refuses.
+        if (nearest > static_cast<double>(b.block))
+            return clockwork_host_forward_route(routeCtx, callCtx, data, len);
+        if (nearest < 0.0) count(hm.out_late);
+        else frame = static_cast<uint32_t>(nearest);
+    }
+    // Every channel is the message on each of the 16.
+    const uint32_t copies = send.every_channel ? 16u : 1u;
+    for (uint32_t c = 0; c < copies; ++c) {
+        if (hm.out_count == clockwork::HostMidi::kOut) {
+            count(hm.out_dropped);
+            continue;
+        }
+        ClockworkHostMidi& e = hm.out[hm.out_count++];
+        e.frame = frame;
+        e.length = send.len;
+        std::memcpy(e.bytes, send.bytes, sizeof e.bytes);
+        if (send.every_channel) e.bytes[0] = static_cast<uint8_t>(e.bytes[0] | c);
+    }
+    return true;
+}
+
+// The port list of a host that supplies its ports itself: answered here, to
+// whoever asked. A host with none has no list of its own, and the verb goes
+// on to the host's end of the chain.
+bool clockwork_host_midi_ports_route(void* routeCtx, const void* callCtx, const uint8_t* data, std::size_t len) {
+    clockwork::CoreState* const st = clockwork::state(static_cast<ClockworkCore*>(routeCtx));
+    if (!st || (st->host_midi.in_port[0] == '\0' && st->host_midi.out_port[0] == '\0'))
+        return clockwork_host_forward_route(routeCtx, callCtx, data, len);
+    const auto* cc = static_cast<const DrainCallCtx*>(callCtx);
+    std::array<uint8_t, 48 + 2 * (clockwork::HostMidi::kNameBytes + 8)> reply{};
+    const uint32_t n = clockwork_midi_wire_ports(st->host_midi.in_port.data(), st->host_midi.out_port.data(), 1,
+                                                 reply.data(), static_cast<uint32_t>(reply.size()));
+    if (n) emit_osc_out(*st, cc ? cc->token : 0, reply.data(), n);
     return true;
 }
 

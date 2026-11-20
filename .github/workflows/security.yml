@@ -102,10 +102,11 @@ jobs:
           RUSTFLAGS: --cfg fuzzing
         run: |
           cd rust
-          cargo test --locked -p clockwork-osc -p clockwork-schedule -p clockwork-audio-decode -p clockwork-comms -p clockwork-osc-net -p clockwork-midi -p clockwork-gamepad corpus -- --nocapture 2>&1 | tee ../replay-rust.log
-          # Seven corpus tests ran, and said so: a crate whose corpus test
-          # vanished would otherwise pass this step in silence.
-          test "$(grep -c 'corpus.* ok$' ../replay-rust.log)" -eq 7
+          cargo test --locked -p clockwork-osc -p clockwork-schedule -p clockwork-audio-decode -p clockwork-comms -p clockwork-osc-net -p clockwork-midi -p clockwork-midi-wire -p clockwork-gamepad corpus -- --nocapture 2>&1 | tee ../replay-rust.log
+          # Nine corpus tests ran, and said so (the wire crate has two): a
+          # crate whose corpus test vanished would otherwise pass this step
+          # in silence.
+          test "$(grep -c 'corpus.* ok$' ../replay-rust.log)" -eq 9
           # And each said it was built as the fuzzer builds.
           test "$(grep -c 'corpus replay built as the fuzzer builds: yes' ../replay-rust.log)" -eq 7
       - name: The C and C++ targets, over their corpora, under ASan and UBSan
@@ -138,6 +139,7 @@ jobs:
           - { target: stream_frames,     kind: rust, seeds: rust/clockwork-comms/corpus,        dict: rust/fuzz/osc.dict }
           - { target: cue_reframe,       kind: rust, seeds: rust/clockwork-osc-net/corpus,      dict: rust/fuzz/osc.dict }
           - { target: midi,              kind: rust, seeds: rust/clockwork-midi/corpus,         dict: rust/fuzz/midi.dict }
+          - { target: midi_wire,         kind: rust, seeds: rust/clockwork-midi/corpus,         dict: rust/fuzz/midi.dict }
           - { target: gamepad,           kind: rust, seeds: rust/clockwork-gamepad/corpus,      dict: rust/fuzz/gamepad.dict }
           - { target: fuzz_osc_received, kind: cpp,  seeds: rust/clockwork-osc/corpus,          dict: rust/fuzz/osc.dict }
           - { target: fuzz_osc_reader,   kind: cpp,  seeds: rust/clockwork-osc/corpus,          dict: rust/fuzz/osc.dict }

@@ -245,6 +245,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "clockwork-midi-wire"
+version = "0.1.0"
+dependencies = [
+ "clockwork-corpus",
+ "clockwork-fence",
+ "clockwork-midi",
+ "clockwork-osc",
+]
+
+[[package]]
 name = "clockwork-native"
 version = "0.1.0"
 dependencies = [
@@ -255,6 +265,7 @@ dependencies = [
  "clockwork-gamepad",
  "clockwork-heap",
  "clockwork-midi",
+ "clockwork-midi-wire",
  "clockwork-osc-net",
  "clockwork-ports",
  "clockwork-ports-disk",

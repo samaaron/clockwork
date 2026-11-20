@@ -120,6 +120,42 @@ impl Default for ClockworkEmbedDevice {
     }
 }
 
+/// A short MIDI message a host's port was sent, at a frame of the render just
+/// done (`clockwork_embed_midi_out`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ClockworkEmbedMidi {
+    /// From the first frame of the render just done.
+    pub frame: u32,
+    pub bytes: [u8; 3],
+    pub length: u8,
+}
+
+/// What a host's own MIDI lost (`clockwork_embed_midi_stats`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClockworkEmbedMidiStats {
+    /// `size_of::<ClockworkEmbedMidiStats>()`, for later fields.
+    pub struct_bytes: u32,
+    /// Handed in with the store full.
+    pub in_dropped: u64,
+    /// Sent with the store full.
+    pub out_dropped: u64,
+    /// Sent for a time that had passed.
+    pub out_late: u64,
+}
+
+impl ClockworkEmbedMidiStats {
+    /// Every count zero, and `struct_bytes` set.
+    pub const fn new() -> Self {
+        Self { struct_bytes: core::mem::size_of::<Self>() as u32, in_dropped: 0, out_dropped: 0, out_late: 0 }
+    }
+}
+
+impl Default for ClockworkEmbedMidiStats {
+    fn default() -> Self { Self::new() }
+}
+
 /// boot: open the device for output only. `input_channels` cannot say this —
 /// its 0 means "what the device has" — and a host that never reads input
 /// should not open it: a microphone permission prompt on macOS, a second
@@ -176,5 +212,19 @@ unsafe extern "C" {
     pub fn clockwork_embed_meter(h: *mut ClockworkEmbed, num: i32, den: i32, frame: u32) -> ClockworkStatus;
     pub fn clockwork_embed_playing(h: *mut ClockworkEmbed, playing: core::ffi::c_int, frame: u32) -> ClockworkStatus;
     pub fn clockwork_embed_beat(h: *mut ClockworkEmbed, beat: f64, how: u32, frame: u32) -> ClockworkStatus;
+    /// A host with MIDI of its own names its ports, one in and one out
+    /// (null for none), once after attach and before the first render.
+    /// E_ARG for a booted handle or a name no port could have.
+    pub fn clockwork_embed_midi_ports(h: *mut ClockworkEmbed, input: *const c_char, output: *const c_char) -> ClockworkStatus;
+    /// The thread that renders, before the render: one whole channel message
+    /// from the host's port for `frame`, counted from the next render's
+    /// first frame. E_ARG for no port in or bytes that are not one message;
+    /// E_FULL for more than the engine holds between blocks.
+    pub fn clockwork_embed_midi_in(h: *mut ClockworkEmbed, bytes: *const u8, length: u32, frame: u32) -> ClockworkStatus;
+    /// The thread that renders, after a render: what was sent to the host's
+    /// port and came due in it, copied to `events`, up to `capacity`; the
+    /// number copied, which are then gone.
+    pub fn clockwork_embed_midi_out(h: *mut ClockworkEmbed, events: *mut ClockworkEmbedMidi, capacity: u32) -> u32;
+    pub fn clockwork_embed_midi_stats(h: *const ClockworkEmbed, stats: *mut ClockworkEmbedMidiStats) -> ClockworkStatus;
     pub fn clockwork_embed_close(h: *mut ClockworkEmbed);
 }

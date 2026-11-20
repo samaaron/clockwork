@@ -112,6 +112,8 @@ fn every_struct_is_the_header_s_size_and_every_field_is_at_the_header_s_offset()
         struct_bytes, driver, device, sample_rate, buffer_frames, block_frames,
         input_channels, output_channels, output_latency_frames, input_latency_frames,
     });
+    expect!(mine, ClockworkEmbedMidi { frame, bytes, length });
+    expect!(mine, ClockworkEmbedMidiStats { struct_bytes, in_dropped, out_dropped, out_late });
     expect!(mine, ClockworkArenaAreaEntry { area, space, base_lo, base_hi, bytes_lo, bytes_hi });
     expect!(mine, ClockworkArenaEntry { id, offset, bytes, owner, audience, cadence, tier, lifetime, geom });
     expect!(mine, ClockworkArenaHeader {

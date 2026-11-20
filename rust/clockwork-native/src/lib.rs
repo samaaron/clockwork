@@ -41,6 +41,9 @@ pub use clockwork_taps;
 /// registry (`clockwork_midi_timelines_*`, src/clock/MidiTimelines.h wraps it).
 pub use clockwork_clock;
 
+// A host's own MIDI, converted on the audio thread (src/midi_wire.h).
+pub use clockwork_midi_wire;
+
 /// The port substrate: frames crossing the audio-thread boundary on a stable
 /// slot (`clockwork_port_*`, src/clockwork_ports.h). Not optional — `audio_processor.cpp`
 /// calls into it every block.

@@ -84,6 +84,8 @@ clockwork-taps = { path = "../clockwork-taps" }
 # builds for. An embedder that only reads the clock out of shared memory never
 # links this crate at all.
 clockwork-clock = { path = "../clockwork-clock" }
+# A host's own MIDI to and from its OSC form (src/midi_wire.h): in every build, as the core converts with it.
+clockwork-midi-wire = { path = "../clockwork-midi-wire" }
 clockwork-midi = { path = "../clockwork-midi", optional = true }
 clockwork-gamepad = { path = "../clockwork-gamepad", optional = true }
 clockwork-osc-net = { path = "../clockwork-osc-net", optional = true }

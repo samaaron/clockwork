@@ -11,6 +11,10 @@
 #                          copying the structs by hand.
 # * `clockwork-osc`     — shared OSC codec (messages + bundles) + name normalisation.
 # * `clockwork-midi`    — midir-based MIDI subsystem.
+# * `clockwork-midi-wire` — a short MIDI message to and from its
+#                          /clockwork/midi/* OSC form with no allocation: what
+#                          the audio thread converts with when a host supplies
+#                          the MIDI ports itself (a DAW, through a plugin).
 # * `clockwork-gamepad` — gilrs-based game-controller subsystem.
 # * `clockwork-osc-net` — std::net OSC networking (cue server + outbound send).
 # * `clockwork-schedule` — the timed-event store and the wire forms that carry
@@ -83,6 +87,7 @@ members = [
     "clockwork-audio-decode",
     "clockwork-corpus",
     "clockwork-midi",
+    "clockwork-midi-wire",
     "clockwork-gamepad",
     "clockwork-osc-net",
     "clockwork-comms",

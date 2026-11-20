@@ -146,6 +146,11 @@ int main(void) {
     F(ClockworkEmbedDevice, sample_rate); F(ClockworkEmbedDevice, buffer_frames); F(ClockworkEmbedDevice, block_frames);
     F(ClockworkEmbedDevice, input_channels); F(ClockworkEmbedDevice, output_channels);
     F(ClockworkEmbedDevice, output_latency_frames); F(ClockworkEmbedDevice, input_latency_frames);
+    S(ClockworkEmbedMidi);
+    F(ClockworkEmbedMidi, frame); F(ClockworkEmbedMidi, bytes); F(ClockworkEmbedMidi, length);
+    S(ClockworkEmbedMidiStats);
+    F(ClockworkEmbedMidiStats, struct_bytes); F(ClockworkEmbedMidiStats, in_dropped);
+    F(ClockworkEmbedMidiStats, out_dropped); F(ClockworkEmbedMidiStats, out_late);
     S(ClockworkArenaHeader);
     F(ClockworkArenaHeader, magic); F(ClockworkArenaHeader, version); F(ClockworkArenaHeader, header_bytes);
     F(ClockworkArenaHeader, instance_id); F(ClockworkArenaHeader, arena_bytes); F(ClockworkArenaHeader, clockwork_bytes);

@@ -41,6 +41,16 @@ struct ClockworkEmbed {
     struct Said { bool said = false; clockwork::HostWord word; };
     std::array<Said, 4> said {};   // by HostWord::Kind: tempo, meter, playing, beat
 
+    // What the engine sent to the host's MIDI port and the host has not yet
+    // asked for (clockwork_embed_midi_out): a ring, each with its frame in
+    // the count `rendered` keeps. Sized here; never touched by an allocator.
+    struct MidiOut { uint64_t frame = 0; uint8_t bytes[3] = {}; uint8_t length = 0; };
+    static constexpr uint32_t kMidiOut = 1024;
+    std::array<MidiOut, kMidiOut> midiOut {};
+    uint32_t midiOutHead = 0, midiOutCount = 0;
+    uint64_t midiOutDropped = 0;   // sent with the ring full
+    uint32_t lastRender = 0;       // the frames of the render just done
+
     // The attach path's core, made and closed by this handle. A booted
     // handle's core is its engine's.
     ClockworkCore* core = nullptr;

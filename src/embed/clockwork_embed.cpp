@@ -96,6 +96,8 @@ bool fit(ClockworkEmbed* h, const ClockworkEmbedConfig* config) {
     // backwards.
     h->rendered = 0;
     h->said = {};   // said for frames of the count that has just ended: the host says its transport again
+    h->midiOutHead = h->midiOutCount = 0;   // and sends kept for frames of it
+    h->lastRender = 0;
     return true;
 }
 
@@ -261,6 +263,23 @@ static void giveHostWords(ClockworkEmbed* h, uint64_t end) {
     }
 }
 
+// What the tick just done sent to the host's MIDI port, kept with its frame
+// in this host's count until the host asks for it.
+static void keepMidiOut(ClockworkEmbed* h) {
+    const ClockworkHostMidi* sent = nullptr;
+    const uint32_t n = clockwork_host_midi_out(h->core, &sent);
+    for (uint32_t i = 0; i < n; ++i) {
+        if (h->midiOutCount == ClockworkEmbed::kMidiOut) {
+            ++h->midiOutDropped;
+            continue;
+        }
+        ClockworkEmbed::MidiOut& e = h->midiOut[(h->midiOutHead + h->midiOutCount++) % ClockworkEmbed::kMidiOut];
+        e.frame  = h->rendered + sent[i].frame;
+        e.length = sent[i].length;
+        std::memcpy(e.bytes, sent[i].bytes, sizeof e.bytes);
+    }
+}
+
 uint32_t clockwork_embed_render(ClockworkEmbed* h,
                                 float* const* out, uint32_t out_channels,
                                 const float* const* in, uint32_t in_channels,
@@ -316,6 +335,7 @@ uint32_t clockwork_embed_render(ClockworkEmbed* h,
             }
             giveHostWords(h, h->rendered + block);
             const ClockworkTick tick = clockwork_tick(h->core, &time, h->outChannels, h->inChannels);
+            keepMidiOut(h);
             h->rendered += block;
 
             // Silence for a block the core did not render (lanes.h).
@@ -344,7 +364,56 @@ uint32_t clockwork_embed_render(ClockworkEmbed* h,
         h->outCount -= chunk;
         done += chunk;
     }
+    h->lastRender = done;
     return done;
+}
+
+ClockworkStatus clockwork_embed_midi_ports(ClockworkEmbed* h, const char* in, const char* out) {
+    if (!h || h->kind != ClockworkEmbed::Kind::Attached) return CLOCKWORK_E_ARG;
+    return clockwork_host_midi_ports(h->core, in, out) ? CLOCKWORK_OK : CLOCKWORK_E_ARG;
+}
+
+ClockworkStatus clockwork_embed_midi_in(ClockworkEmbed* h, const uint8_t* bytes, uint32_t length, uint32_t frame) {
+    if (!h || h->kind != ClockworkEmbed::Kind::Attached) return CLOCKWORK_E_ARG;
+    ClockworkHostMidiStats before {};
+    clockwork_host_midi_stats(h->core, &before);
+    // The next frame the host is handed is the oldest one rendered and not yet served.
+    if (clockwork_host_midi_in(h->core, bytes, length, h->rendered - h->outCount + frame)) return CLOCKWORK_OK;
+    // Refused: the store was full if that is what was counted, else the bytes or the port.
+    ClockworkHostMidiStats after {};
+    clockwork_host_midi_stats(h->core, &after);
+    return after.in_dropped != before.in_dropped ? CLOCKWORK_E_FULL : CLOCKWORK_E_ARG;
+}
+
+uint32_t clockwork_embed_midi_out(ClockworkEmbed* h, ClockworkEmbedMidi* events, uint32_t capacity) {
+    if (!h || h->kind != ClockworkEmbed::Kind::Attached || !events) return 0;
+    // The render just done was of the frames [first, served).
+    const uint64_t served = h->rendered - h->outCount;
+    const uint64_t first  = served - h->lastRender;
+    uint32_t n = 0;
+    while (n < capacity && h->midiOutCount > 0) {
+        const ClockworkEmbed::MidiOut& e = h->midiOut[h->midiOutHead];
+        if (e.frame >= served) break;   // for a frame the host has not yet been handed
+        // One the host did not ask for after an earlier render is at this one's first frame.
+        events[n].frame  = e.frame > first ? static_cast<uint32_t>(e.frame - first) : 0u;
+        events[n].length = e.length;
+        std::memcpy(events[n].bytes, e.bytes, sizeof e.bytes);
+        ++n;
+        h->midiOutHead = (h->midiOutHead + 1) % ClockworkEmbed::kMidiOut;
+        --h->midiOutCount;
+    }
+    return n;
+}
+
+ClockworkStatus clockwork_embed_midi_stats(const ClockworkEmbed* h, ClockworkEmbedMidiStats* stats) {
+    if (!h || h->kind != ClockworkEmbed::Kind::Attached || !stats || stats->struct_bytes < sizeof(ClockworkEmbedMidiStats))
+        return CLOCKWORK_E_ARG;
+    ClockworkHostMidiStats core {};
+    clockwork_host_midi_stats(h->core, &core);
+    stats->in_dropped  = core.in_dropped;
+    stats->out_dropped = core.out_dropped + h->midiOutDropped;
+    stats->out_late    = core.out_late;
+    return CLOCKWORK_OK;
 }
 
 void clockwork_embed_close(ClockworkEmbed* h) {

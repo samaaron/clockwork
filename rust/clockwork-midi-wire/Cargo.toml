@@ -1,0 +1,26 @@
+[package]
+name = "clockwork-midi-wire"
+version = "0.1.0"
+edition = "2021"
+authors = ["Sam Aaron"]
+description = "A short MIDI message to and from its /clockwork/midi/* OSC form, with no allocation: what the engine's audio thread converts with when its host supplies the MIDI ports (a DAW, a board's UART)."
+license = "AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial"
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+clockwork-fence = { path = "../clockwork-fence" }
+
+[dev-dependencies]
+clockwork-corpus = { path = "../clockwork-corpus" }
+
+# The allocating schema the device subsystem uses (clockwork-midi) is the
+# reference these conversions are held to, byte for byte (tests/schema.rs).
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+clockwork-midi = { path = "../clockwork-midi" }
+clockwork-osc = { path = "../clockwork-osc" }
