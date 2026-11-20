@@ -243,6 +243,13 @@ TEST_CASE("embed midi: more notes than a render's store holds are refused and co
 }
 
 // ── Out ──────────────────────────────────────────────────────────────────────
+//
+// A send for a time is held by the engine's timed store. A build without one
+// (CLOCKWORK_SCHEDULER=OFF) refuses "/clockwork/schedule" out loud, so these
+// cases, which place their sends at frames, are for a build that has it; what
+// a build without it does is pinned below them.
+
+#if CLOCKWORK_SCHEDULER
 
 TEST_CASE("embed midi: a send for a time comes out in the render that holds it, at its frame", "[embed][midi]") {
     const std::initializer_list<uint32_t> buffers[] = {
@@ -398,6 +405,37 @@ TEST_CASE("embed midi: the core hands a tick's sends over once", "[embed][midi]"
     CHECK(host.renderAll({ 512, 512 }).empty());
 }
 
+#else // no timed store
+
+TEST_CASE("embed midi, no timed store: a send with no time still reaches the host's port, at once", "[embed][midi]") {
+    Host host;
+    host.render(512);
+    host.send(midiOut("note_on", "daw", { 1, 60, 100 }));
+    const auto sent = host.render(512);
+    REQUIRE(sent.size() == 1);
+    CHECK(sent[0].bytes == std::vector<uint8_t>{ 0x90, 60, 100 });
+    CHECK(host.stats().out_late == 0u);
+    CHECK(host.stats().out_dropped == 0u);
+}
+
+TEST_CASE("embed midi, no timed store: a send for a time is refused to its client, and nothing reaches the host",
+          "[embed][midi]") {
+    Host host;
+    host.render(512);
+    host.heard();
+    host.sendAt(host.frames + 100, midiOut("note_on", "daw", { 1, 60, 100 }));
+    // Not sent at once in place of its time, and not kept: the client asked for a time and is told it has none.
+    CHECK(host.renderAll({ 512, 512 }).empty());
+    int refused = 0;
+    for (const auto& r : host.heard())
+        refused += r.address == "/clockwork/error" && r.argString(0) == "/clockwork/schedule";
+    CHECK(refused == 1);
+    CHECK(host.stats().out_late == 0u);
+    CHECK(host.stats().out_dropped == 0u);
+}
+
+#endif // CLOCKWORK_SCHEDULER
+
 // ── The port list ────────────────────────────────────────────────────────────
 
 TEST_CASE("embed midi: a host's ports are in the port list", "[embed][midi]") {
@@ -463,7 +501,7 @@ TEST_CASE("embed midi: two engines keep two hosts' MIDI apart", "[embed][midi]")
     a.wantMidi();
     b.wantMidi();
     REQUIRE(clockwork_embed_midi_in(a.h, kNoteOn, 3, 5) == CLOCKWORK_OK);
-    b.sendAt(b.frames + 9, midiOut("note_on", "daw", { 1, 72, 100 }));
+    b.send(midiOut("note_on", "daw", { 1, 72, 100 }));   // with no time: a build with no timed store sends it too
     const auto fromA = a.renderAll({ 512 });
     const auto fromB = b.renderAll({ 512 });
     CHECK(fromA.empty());

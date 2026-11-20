@@ -107,8 +107,10 @@ jobs:
           # crate whose corpus test vanished would otherwise pass this step
           # in silence.
           test "$(grep -c 'corpus.* ok$' ../replay-rust.log)" -eq 9
-          # And each said it was built as the fuzzer builds.
-          test "$(grep -c 'corpus replay built as the fuzzer builds: yes' ../replay-rust.log)" -eq 7
+          # And each said it was built as the fuzzer builds: all but the wire
+          # crate's second, which holds the first to the MIDI schema and
+          # replays nothing itself.
+          test "$(grep -c 'corpus replay built as the fuzzer builds: yes' ../replay-rust.log)" -eq 8
       - name: The C and C++ targets, over their corpora, under ASan and UBSan
         run: |
           CC=gcc CXX=g++ cmake -S test/fuzz -B build-fuzz -DCMAKE_BUILD_TYPE=RelWithDebInfo
