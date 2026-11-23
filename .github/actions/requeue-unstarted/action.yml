@@ -5,7 +5,7 @@ description: >
   Queue again the jobs of a failed workflow run that GitHub cancelled before
   they ran a step, because no runner took them. Three times at most. A run
   a person cancelled, or a newer push superseded, is left alone, as is a
-  job that ran and failed. The calling job needs `actions: write`.
+  run with a job that ran and failed. The calling job needs `actions: write`.
 inputs:
   run-id:
     description: The workflow run to look at (github.event.workflow_run.id).

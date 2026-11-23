@@ -8,9 +8,14 @@
 // not acquired by Runner of type hosted"): the pool had no runner for it.
 // The run then shows as failed, and nothing about the code was tested or
 // found wanting. This asks for those jobs again, three times at most, and
-// leaves every other kind of red alone: a job that ran and failed, a run a
-// person cancelled, a run a newer push superseded (those are cancelled, not
-// failed).
+// leaves every other kind of red alone: a run with a job that ran and
+// failed, a run a person cancelled, a run a newer push superseded (those
+// are cancelled, not failed).
+//
+// The asking is one request for the whole run (rerun-failed-jobs). GitHub
+// refuses a request per job after the first, which has already set the run
+// going again. That one request runs again every job that is not green, so
+// it is only made when the unstarted jobs are all that is not green.
 //
 //   node requeue.mjs --repo owner/name --run <id> [--max-attempts 3] [--dry-run]
 //
@@ -19,6 +24,7 @@
 import { execFileSync } from "node:child_process";
 
 export const MAX_ATTEMPTS = 3;
+const GREEN = ["success", "skipped", "neutral"];
 
 // What to do about a run, from the run itself and its jobs (parseJobs'
 // shape): { action: "none" | "requeue" | "give-up", reason, jobs }.
@@ -27,6 +33,8 @@ export function decide(run, jobs, { maxAttempts = MAX_ATTEMPTS } = {}) {
   if (run.conclusion !== "failure") return { action: "none", reason: `not a failure: ${run.conclusion}`, jobs: [] };
   const unstarted = jobs.filter((j) => j.conclusion === "cancelled" && j.steps === 0);
   if (unstarted.length === 0) return { action: "none", reason: "every job ran: a real failure", jobs: [] };
+  const red = jobs.filter((j) => !unstarted.includes(j) && !GREEN.includes(j.conclusion));
+  if (red.length) return { action: "none", reason: `a real failure, ran and did not pass: ${red.map((j) => j.name).join(", ")}`, jobs: [] };
   if (run.run_attempt > maxAttempts) {
     return { action: "give-up", reason: `no runner took them three times (attempt ${run.run_attempt}): giving up`, jobs: unstarted };
   }
@@ -40,6 +48,11 @@ export function parseJobs(text) {
     const j = JSON.parse(l);
     return { id: j.id, name: j.name, status: j.status, conclusion: j.conclusion, steps: j.steps.length };
   });
+}
+
+// The gh calls a decision asks for: one for the run, however many jobs.
+export function requests(repo, runId, d) {
+  return d.action === "requeue" ? [["api", "-X", "POST", `repos/${repo}/actions/runs/${runId}/rerun-failed-jobs`]] : [];
 }
 
 function gh(args) {
@@ -64,11 +77,10 @@ function main(argv) {
   const d = decide(run, jobs, { maxAttempts });
   console.log(`${run.name ?? "run"} ${runId} (attempt ${run.run_attempt}, ${run.status}${run.conclusion ? `, ${run.conclusion}` : ""}): ${d.reason}`);
   for (const j of d.jobs) console.log(`  ${j.name}: no runner took it`);
-  if (d.action !== "requeue") return;
-  for (const j of d.jobs) {
-    if (dryRun) { console.log(`  would queue ${j.name} again`); continue; }
-    gh(["api", "-X", "POST", `repos/${repo}/actions/jobs/${j.id}/rerun`]);
-    console.log(`  queued ${j.name} again`);
+  for (const args of requests(repo, runId, d)) {
+    if (dryRun) { console.log("  would queue them again"); continue; }
+    gh(args);
+    console.log("  queued them again");
   }
 }
 
