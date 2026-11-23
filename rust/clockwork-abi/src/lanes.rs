@@ -20,6 +20,9 @@ use core::ffi::{c_char, c_int, c_void};
 
 /// One drained egress frame: the token it was written with, the OSC bytes
 /// (valid only for the duration of the call), and the ring sequence number.
+/// Writes one message into `room` bytes at `at`: the bytes written, 0 for none.
+pub type ClockworkFill = Option<unsafe extern "C" fn(ctx: *mut c_void, at: *mut u8, room: u32) -> u32>;
+
 pub type ClockworkEgressFn = Option<
     unsafe extern "C" fn(ctx: *mut c_void, token: u32, osc: *const u8, len: u32, seq: u32),
 >;
@@ -102,6 +105,10 @@ unsafe extern "C" {
 
     // ── Ingress ──
     pub fn clockwork_ingress_write(core: *mut ClockworkCore, osc: *const u8, len: u32, token: u32) -> bool;
+    /// The same, written where it lies: `fill` writes the message into the
+    /// room reserved for it, under the ring's writer lock, and answers the
+    /// bytes it wrote.
+    pub fn clockwork_ingress_write_with(core: *mut ClockworkCore, max_bytes: u32, token: u32, fill: ClockworkFill, ctx: *mut c_void) -> bool;
 
     // ── Egress ── one draining thread per ring; max_frames 0 drains all.
     pub fn clockwork_egress_rt_drain(core: *mut ClockworkCore, f: ClockworkEgressFn, ctx: *mut c_void, max_frames: u32) -> u32;

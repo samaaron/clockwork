@@ -24,3 +24,7 @@ pub const EMIT_REPLY: i32 = 1;
 
 /// The panic fence every subsystem's C ABI is built on (clockwork-fence).
 pub use clockwork_fence::no_unwind;
+
+/// An event written straight into the room the host reserves for it in the
+/// engine's in ring, instead of handed over as bytes (clockwork-fence).
+pub use clockwork_fence::{event_with, EventFn, FillFn};

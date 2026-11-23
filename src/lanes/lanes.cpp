@@ -98,7 +98,25 @@ bool clockwork_ingress_write(ClockworkCore* core, const uint8_t* osc, uint32_t l
     return clockwork_ingress_write_status(core, osc, len, token) == InRingWrite::Written;
 }
 
+bool clockwork_ingress_write_with(ClockworkCore* core, uint32_t max_bytes, uint32_t token,
+                                  ClockworkFill fill, void* ctx) {
+    return clockwork_ingress_write_with_status(core, max_bytes, token, fill, ctx) == InRingWrite::Written;
+}
+
 } // extern "C"
+
+// No guest instance to take it: refused at the boundary (in_ring_door.h),
+// with the word on the NRT egress for the source that sent it, as the
+// client ABI's status says the same to its caller (docs/RESTARTS.md).
+// Clockwork's own verbs go through and wait in the ring for the engine,
+// instance or none.
+static void refuse_no_instance(ClockworkCore* core, const uint8_t* base, const uint8_t* osc, uint32_t len, uint32_t token) {
+    clockwork_sys_refuse(osc, len, CLOCKWORK_REFUSED_NO_INSTANCE,
+        arenaInstanceGeneration(base),
+        [core, token](const uint8_t* d, uint32_t n) {
+            clockwork_egress_nrt_write(core, token, d, n);
+        });
+}
 
 InRingWrite clockwork_ingress_write_status(ClockworkCore* core, const uint8_t* osc, uint32_t len, uint32_t token) {
     uint8_t* const base = clockwork::laid_out_base(core);
@@ -122,20 +140,42 @@ InRingWrite clockwork_ingress_write_status(ClockworkCore* core, const uint8_t* o
         clockwork_control_wake(core);
         return InRingWrite::Written;
     }
-    // No guest instance to take it: refused at the boundary (in_ring_door.h),
-    // with the word on the NRT egress for the source that sent it, as the
-    // client ABI's status says the same to its caller (docs/RESTARTS.md).
-    // Clockwork's own verbs go through and wait in the ring for the engine,
-    // instance or none.
     const clockwork::Layout& L = clockwork::layout_of(core);
     const InRingWrite wrote = in_ring_write(base, base + L.in_ring_start, L.profile.in_ring_bytes,
                                             cursors, osc, len, token);
-    if (wrote == InRingWrite::NoInstance)
-        clockwork_sys_refuse(osc, len, CLOCKWORK_REFUSED_NO_INSTANCE,
-            arenaInstanceGeneration(base),
-            [core, token](const uint8_t* d, uint32_t n) {
-                clockwork_egress_nrt_write(core, token, d, n);
-            });
+    if (wrote == InRingWrite::NoInstance) refuse_no_instance(core, base, osc, len, token);
+    return wrote;
+}
+
+InRingWrite clockwork_ingress_write_with_status(ClockworkCore* core, uint32_t max_bytes, uint32_t token,
+                                                ClockworkFill fill, void* ctx) {
+    uint8_t* const base = clockwork::laid_out_base(core);
+    if (!clockwork::ingress(core) || !base || !fill || max_bytes == 0)
+        return InRingWrite::Unfilled;
+    RingCursors* const cursors = clockwork::cursors_in(base, clockwork::layout_of(core));
+    const clockwork::Layout& L = clockwork::layout_of(core);
+    const bool served = cursors->status_flags.load(std::memory_order_acquire) & STATUS_CONTROL_SERVED;
+    // The address of a message the door refused, kept to say so once the
+    // ring's lock is given back: a refusal echoes the address and no more.
+    std::array<uint8_t, 256> refused;   // read only as far as refused_len
+    uint32_t refused_len = 0;
+    const InRingWrite wrote = in_ring_write_with(base, base + L.in_ring_start, L.profile.in_ring_bytes,
+        cursors, max_bytes, token,
+        [fill, ctx, served](uint8_t* at, uint32_t room) -> uint32_t {
+            const uint32_t len = fill(ctx, at, room);
+            // A control verb's place, while the engine serves the control
+            // ring, is that ring: found only once the message is written,
+            // which is here and not there. This door is for events, which
+            // are never control verbs, and writes nothing rather than put
+            // one where its answer waits for an audio block.
+            if (served && len != 0 && len <= room && clockwork_sys_control_takes(at, len)) return 0;
+            return len;
+        },
+        [&refused, &refused_len](const uint8_t* at, uint32_t len) {
+            refused_len = len < refused.size() ? len : static_cast<uint32_t>(refused.size());
+            std::memcpy(refused.data(), at, refused_len);
+        });
+    if (wrote == InRingWrite::NoInstance) refuse_no_instance(core, base, refused.data(), refused_len, token);
     return wrote;
 }
 

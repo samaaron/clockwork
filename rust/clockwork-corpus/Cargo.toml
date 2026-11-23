@@ -7,7 +7,7 @@ edition = "2021"
 authors = ["Sam Aaron"]
 license = "AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial"
 publish = false
-description = "Replays a crate's fuzz corpus through its fuzz body, as a test. A dev-dependency of every crate that keeps one; never in the staticlib."
+description = "What Clockwork's Rust tests share: a crate's fuzz corpus replayed through its fuzz body, and an allocator that counts. A dev-dependency only; never in the staticlib."
 
 [lints]
 workspace = true

@@ -16,7 +16,8 @@
 #include "clock/timeline_osc.h"
 #include "clockwork_config.h"   // clockwork_log
 #include "clockwork_midi.h"
-#include "lanes/lanes.h"        // clockwork_ingress_write: an event enters like any other
+#include "EventIngress.h"       // an event enters the in ring where it is to lie
+#include "lanes/lanes.h"        // clockwork_ingress_write: a change in what is there enters like any other
 
 extern "C" const char* clockwork_app_name();
 #include "clock/MidiClockOut.h"
@@ -42,7 +43,7 @@ void MidiControl::init(OscEgress* egress, ClockworkClock* clock, MidiClockOut* c
             broadcastTimelines();
         });
     if (!mMidi) {
-        mMidi = clockwork_midi_create(core(), this, &MidiControl::emitCb, &MidiControl::clockCb,
+        mMidi = clockwork_midi_create(core(), this, &MidiControl::emitCb, &MidiControl::eventCb, &MidiControl::clockCb,
                                &MidiControl::transportCb, clockwork_app_name());
     }
 }
@@ -287,12 +288,16 @@ static void logMidiPortsChange(ClockworkCore* core, const uint8_t* data, uint32_
     clockwork_log(core, "[midi] ports: in=[%s] out=[%s]", ins.c_str(), outs.c_str());
 }
 
-// A reply goes to its caller. An EVENT — what a port sent, a ports change —
-// goes into the IN ring, on the subsystem's own thread, to be answered on the
-// audio thread by clockwork_event_route: out to the MIDI audience, and to the
-// guest if it asked. The same door a host's front on the web pushes events
-// through, so an event reaches a client or a guest the same way whichever
-// side produced it. A full ring drops it and says so.
+// A reply goes to its caller. An EVENT — what a port sent (eventCb), a ports
+// change (here) — goes into the IN ring, on the subsystem's own thread, to be
+// answered on the audio thread by clockwork_event_route: out to the MIDI
+// audience, and to the guest if it asked. The same door a host's front on the
+// web pushes events through, so an event reaches a client or a guest the same
+// way whichever side produced it. A full ring drops it and says so.
+//
+// A ports change comes as bytes, since its line in the log is read from them;
+// what a port sent is written into the ring where it lies, on a thread that
+// must not allocate.
 void MidiControl::emitCb(void* ctx, int32_t kind, const uint8_t* osc, uint32_t len) {
     auto* self = static_cast<MidiControl*>(ctx);
     if (!self->mEgress) return;
@@ -306,6 +311,12 @@ void MidiControl::emitCb(void* ctx, int32_t kind, const uint8_t* osc, uint32_t l
                               reinterpret_cast<const char*>(osc));
         }
     }
+}
+
+void MidiControl::eventCb(void* ctx, uint32_t room, ClockworkFill fill, void* fillCtx) {
+    auto* self = static_cast<MidiControl*>(ctx);
+    if (!self->mEgress) return;
+    clockwork_event_ingress(self->mEgress->core(), room, fill, fillCtx, self->mDroppedLog, "MIDI");
 }
 
 // One 0xF8 pulse feeds the port's own midi timeline (claimed by normalised

@@ -259,14 +259,20 @@ pub fn encode_in(port: &str, msg: &MidiMessage) -> Option<Result<Vec<u8>, Unwrit
     encode_in_at(port, msg, 0)
 }
 
-/// [`write_in`], as a `Vec`.
-pub fn encode_in_at(port: &str, msg: &MidiMessage, when: u64) -> Option<Result<Vec<u8>, Unwritable>> {
+/// The room [`write_in`] takes at most, whatever `when` is: what to reserve
+/// for the event before it is written. None for a clock pulse.
+pub fn in_room(port: &str, msg: &MidiMessage) -> Option<usize> {
     let address = in_address(msg)?;
     let data = match msg {
         MidiMessage::SysEx(bytes) => wire::blob_room(bytes.len()),
         _ => 3 * 4,
     };
-    let room = wire::room(address, 5, wire::text_room(port) + data + 8);
+    Some(wire::room(address, 5, wire::text_room(port) + data + 8))
+}
+
+/// [`write_in`], as a `Vec`.
+pub fn encode_in_at(port: &str, msg: &MidiMessage, when: u64) -> Option<Result<Vec<u8>, Unwritable>> {
+    let (address, room) = (in_address(msg)?, in_room(port, msg)?);
     Some(wire::to_vec(room, |buf| write_event(buf, address, port, msg, when)))
 }
 

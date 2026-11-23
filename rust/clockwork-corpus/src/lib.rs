@@ -18,6 +18,8 @@
 //! passes whether or not the bug behind it is fixed. Every replay says how it
 //! was built, and the replay job counts the lines.
 
+pub mod counting;
+
 use std::path::Path;
 
 /// Every file under `<manifest_dir>/corpus/seeds` and `/corpus/regressions`

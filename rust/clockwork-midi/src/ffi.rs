@@ -9,8 +9,11 @@
 //! Clock-OUT generation lives engine-side in MidiClockOut.
 //!
 //! Data flows back to the engine through the callbacks:
-//! * `emit` — a `/clockwork/midi/in/*` (or `/clockwork/midi/ports*`) OSC packet
-//!   to inject into the RT IN ring / broadcast to subscribers.
+//! * `emit` — a `/clockwork/midi/ports*` OSC packet to inject into the RT IN
+//!   ring / reply to its asker.
+//! * `event` — a `/clockwork/midi/in/*` event, written straight into the room
+//!   the engine reserves for it in the RT IN ring: this runs on the system's
+//!   MIDI thread, and builds nothing on the way.
 //! * `clock` — one 0xF8 pulse → ClockworkClock (pulse-count beat + estimate).
 //! * `transport` — Start/Continue/Stop/SongPosition → ClockworkClock transport.
 //!
@@ -26,13 +29,13 @@ use std::sync::{Arc, Mutex, Weak};
 use crate::device::{InputCallback, MidiIo};
 use clockwork_log::ClockworkCore;
 use crate::message::MidiMessage;
-use crate::schema::{decode_out, encode_in_at, encode_ports, encode_ports_reply, OutCommand};
+use crate::schema::{decode_out, encode_ports, encode_ports_reply, in_room, write_in, OutCommand};
 use crate::sync::{transport_event, TransportEvent};
 
-// Emit-callback shape (here delivering `/clockwork/midi/in/*` + `/clockwork/midi/ports*` packets),
-// kind codes and panic fence: shared across the subsystem C ABIs — see
-// clockwork_osc::ffi.
-pub use clockwork_osc::ffi::{no_unwind, EmitFn, EMIT_BROADCAST, EMIT_REPLY};
+// The callbacks' shapes (emit for `/clockwork/midi/ports*` packets, event for
+// `/clockwork/midi/in/*`), kind codes and panic fence: shared across the
+// subsystem C ABIs — see clockwork_osc::ffi.
+pub use clockwork_osc::ffi::{event_with, no_unwind, EmitFn, EventFn, FillFn, EMIT_BROADCAST, EMIT_REPLY};
 use clockwork_osc::Refusal;
 /// One MIDI clock pulse (0xF8) for an input port → the engine, which anchors the
 /// timeline beat on the pulse count and estimates tempo engine-side (not here).
@@ -68,6 +71,7 @@ pub const TRANSPORT_POSITION: i32 = 3;
 struct Host {
     ctx: *mut c_void,
     emit: EmitFn,
+    event: EventFn,
     clock: ClockFn,
     transport: TransportFn,
 }
@@ -314,9 +318,11 @@ fn handle_input(listeners: &[Arc<Listener>], norm: &str, raw: &str, ts_us: u64, 
 
     // Everything else surfaces as a /clockwork/midi/in/* event for the
     // engine/clients, carrying the moment the OS stamped it, as on the web.
-    if let Some(Ok(osc)) = encode_in_at(norm, &msg, when) {
+    // Written where it is to lie in each core's ring: nothing is built here.
+    if let Some(room) = in_room(norm, &msg) {
+        let write = |buf: &mut [u8]| write_in(buf, norm, &msg, when).and_then(Result::ok).map(<[u8]>::len);
         for l in listeners {
-            l.host.emit(EMIT_BROADCAST, &osc);
+            event_with(l.host.event, l.host.ctx, room, &write);
         }
     }
 }
@@ -343,6 +349,7 @@ pub unsafe extern "C" fn clockwork_midi_create(
     core: *mut ClockworkCore,
     ctx: *mut c_void,
     emit: EmitFn,
+    event: EventFn,
     clock: ClockFn,
     transport: TransportFn,
     app_name: *const std::ffi::c_char,
@@ -363,7 +370,7 @@ pub unsafe extern "C" fn clockwork_midi_create(
             client_name
         };
         let me = Arc::new(Listener {
-            host: Host { ctx, emit, clock, transport },
+            host: Host { ctx, emit, event, clock, transport },
             input: Arc::new(Mutex::new(InputState::default())),
         });
         let midi = process_midi(core, client_name);
@@ -538,33 +545,143 @@ mod tests {
     use clockwork_osc::wire::{self, Arg, Message};
     use std::sync::Mutex as StdMutex;
 
-    static EMITTED: StdMutex<Vec<Vec<u8>>> = StdMutex::new(Vec::new());
+    // The test binary's allocator counts, for the test that an event is
+    // delivered without allocating.
+    #[global_allocator]
+    static COUNTING: clockwork_corpus::counting::Counting = clockwork_corpus::counting::Counting;
 
-    extern "C" fn capture(_: *mut c_void, _: i32, osc: *const u8, len: u32) {
-        // SAFETY: the bytes handle_input hands to Host::emit, for this call.
-        let bytes = unsafe { slice::from_raw_parts(osc, len as usize) };
-        EMITTED.lock().unwrap().push(bytes.to_vec());
-    }
+    extern "C" fn no_emit(_: *mut c_void, _: i32, _: *const u8, _: u32) {}
     extern "C" fn no_clock(_: *mut c_void, _: *const u8, _: u32, _: *const u8, _: u32, _: u64) {}
     extern "C" fn no_transport(_: *mut c_void, _: *const u8, _: u32, _: *const u8, _: u32, _: i32, _: f64) {}
+
+    /// The event `fill` writes into `room` bytes, as a host's ring would have it.
+    fn filled(room: u32, fill: FillFn, fill_ctx: *mut c_void) -> Vec<u8> {
+        let mut bytes = vec![0u8; room as usize];
+        let wrote = fill(fill_ctx, bytes.as_mut_ptr(), room) as usize;
+        bytes.truncate(wrote);
+        bytes
+    }
+
+    // A host with a ring of its own: `ctx` is a `Ring`, which keeps each
+    // event as it was written and the room it was given.
+    #[derive(Default)]
+    struct Ring {
+        events: Vec<Vec<u8>>,
+        rooms: Vec<u32>,
+    }
+    extern "C" fn into_ring(ctx: *mut c_void, room: u32, fill: FillFn, fill_ctx: *mut c_void) {
+        // SAFETY: the Mutex<Ring> the test made its listener with, alive for the test.
+        let ring = unsafe { &*ctx.cast::<StdMutex<Ring>>() };
+        let event = filled(room, fill, fill_ctx);
+        let mut ring = ring.lock().unwrap();
+        ring.events.push(event);
+        ring.rooms.push(room);
+    }
+    fn listener(ring: &StdMutex<Ring>, event: EventFn) -> Arc<Listener> {
+        Arc::new(Listener {
+            host: Host { ctx: ptr::from_ref(ring).cast_mut().cast(), emit: no_emit, event, clock: no_clock, transport: no_transport },
+            input: Arc::new(Mutex::new(InputState::default())),
+        })
+    }
 
     #[test]
     fn an_event_carries_the_moment_the_os_stamped_it() {
         // The web stamps each event with when it arrived; natively the OS
         // stamps it at the system boundary, and that stamp rides on the event
         // as its trailing timetag, so a client reads one shape on every host.
-        let me = Arc::new(Listener {
-            host: Host { ctx: std::ptr::null_mut(), emit: capture, clock: no_clock, transport: no_transport },
-            input: Arc::new(Mutex::new(InputState::default())),
-        });
-        EMITTED.lock().unwrap().clear();
+        let ring = StdMutex::new(Ring::default());
         let when = 0xE000_0000_8000_0000u64;
-        handle_input(&[me], "keys", "Keys", 1_000_000, when, &[0x90, 60, 100]);
-        let sent = EMITTED.lock().unwrap().clone();
+        handle_input(&[listener(&ring, into_ring)], "keys", "Keys", 1_000_000, when, &[0x90, 60, 100]);
+        let sent = &ring.lock().unwrap().events;
         assert_eq!(sent.len(), 1);
         let m = Message::parse(&sent[0]).unwrap();
         assert_eq!(m.address(), clockwork_osc::clockwork_sys!("midi/in/note_on"));
         assert_eq!(m.args().last(), Some(Arg::TimeTag(clockwork_osc::Timetag::from_ntp(when))));
+    }
+
+    // What a port sent is written into the room the host reserves, and is
+    // there what `encode_in_at` makes of the same message: channel messages,
+    // a sysex of any length, with a moment and without.
+    #[test]
+    fn an_event_is_written_into_the_hosts_room_as_the_message_it_is() {
+        let long_sysex: Vec<u8> = std::iter::once(0xF0).chain((0..300).map(|i| (i % 128) as u8)).chain([0xF7]).collect();
+        let wires: [&[u8]; 6] = [&[0x90, 60, 100], &[0x81, 60, 0], &[0xB2, 7, 127], &[0xE0, 0, 64], &[0xFA], &long_sysex];
+        for wire in wires {
+            for when in [0u64, 0xE000_0000_8000_0000] {
+                let ring = StdMutex::new(Ring::default());
+                handle_input(&[listener(&ring, into_ring)], "keys", "Keys", 0, when, wire);
+                let ring = ring.lock().unwrap();
+                let msg = MidiMessage::parse(wire).unwrap();
+                let made = crate::schema::encode_in_at("keys", &msg, when).unwrap().unwrap();
+                assert_eq!(ring.events, [made], "{wire:02x?} at {when}");
+                assert_eq!(ring.rooms, [in_room("keys", &msg).unwrap() as u32]);
+            }
+        }
+    }
+
+    // A clock pulse is no event, and a port name that cannot be written
+    // leaves none: the host is asked for no room, or its room is left unused.
+    #[test]
+    fn what_is_no_event_leaves_none() {
+        let ring = StdMutex::new(Ring::default());
+        handle_input(&[listener(&ring, into_ring)], "keys", "Keys", 0, 0, &[0xF8]);
+        assert!(ring.lock().unwrap().rooms.is_empty(), "a clock pulse asks for no room");
+        handle_input(&[listener(&ring, into_ring)], "ke\0ys", "Keys", 0, 0, &[0x90, 60, 100]);
+        assert_eq!(ring.lock().unwrap().events, [Vec::<u8>::new()], "a name with a NUL in it writes nothing");
+    }
+
+    // The fill may be run again by the host (a second ring, a line for the
+    // log) and writes the same bytes; given less room than it asked for, it
+    // writes nothing.
+    #[test]
+    fn the_fill_writes_the_same_bytes_each_time_and_nothing_into_too_little_room() {
+        static SEEN: StdMutex<Vec<Vec<u8>>> = StdMutex::new(Vec::new());
+        extern "C" fn thrice(_: *mut c_void, room: u32, fill: FillFn, fill_ctx: *mut c_void) {
+            let mut seen = SEEN.lock().unwrap();
+            seen.push(filled(room, fill, fill_ctx));
+            seen.push(filled(room, fill, fill_ctx));
+            seen.push(filled(room - 4, fill, fill_ctx));
+        }
+        let ring = StdMutex::new(Ring::default());
+        handle_input(&[listener(&ring, thrice)], "keys", "Keys", 0, 7, &[0x90, 60, 100]);
+        let seen = SEEN.lock().unwrap();
+        assert!(!seen[0].is_empty());
+        assert_eq!(seen[0], seen[1]);
+        assert!(seen[2].is_empty());
+    }
+
+    // The system's MIDI thread must not allocate, and delivering what a port
+    // sent to every core allocates nothing: counted, by an allocator shown
+    // to count.
+    #[test]
+    fn delivering_an_event_allocates_nothing() {
+        use clockwork_corpus::counting::allocations_in;
+        static WROTE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        extern "C" fn into_the_stack(_: *mut c_void, room: u32, fill: FillFn, fill_ctx: *mut c_void) {
+            let mut ring = [0u8; 256];
+            assert!(room as usize <= ring.len());
+            WROTE.fetch_add(fill(fill_ctx, ring.as_mut_ptr(), room) as usize, std::sync::atomic::Ordering::Relaxed);
+        }
+        let ring = StdMutex::new(Ring::default());
+        let cores = [listener(&ring, into_the_stack), listener(&ring, into_the_stack)];
+        assert_eq!(allocations_in(|| drop(vec![0u8; 16])), 1, "the allocator counts");
+
+        // A std mutex on macOS is made the first time it is locked; each
+        // core's is locked here first, as a port's first transport message
+        // would lock it.
+        for core in &cores {
+            drop(core.input.lock().unwrap());
+        }
+        let when = 0xE000_0000_8000_0000;
+        for wire in [&[0x90u8, 60, 100][..], &[0x80, 60, 0], &[0xB0, 7, 127], &[0xE3, 0, 64], &[0xFA], &[0xF2, 0, 1]] {
+            let counted = allocations_in(|| handle_input(&cores, "keys", "Keys", 0, when, wire));
+            assert_eq!(counted, 0, "{wire:02x?}");
+        }
+        // A sysex is the exception, and not in its delivery: reading it
+        // (MidiMessage::parse) keeps its bytes, once, however many cores hear it.
+        let counted = allocations_in(|| handle_input(&cores, "keys", "Keys", 0, when, &[0xF0, 1, 2, 3, 0xF7]));
+        assert_eq!(counted, 1);
+        assert!(WROTE.load(std::sync::atomic::Ordering::Relaxed) > 7 * 2 * 40, "and the events were written");
     }
 
     // What each core's handle was told, by core.
@@ -574,6 +691,10 @@ mod tests {
         // SAFETY: the bytes Host::emit hands over, for this call.
         let bytes = unsafe { slice::from_raw_parts(osc, len as usize) };
         HEARD.lock().unwrap().push((ctx as usize, bytes.to_vec()));
+    }
+
+    extern "C" fn event_heard_by(ctx: *mut c_void, room: u32, fill: FillFn, fill_ctx: *mut c_void) {
+        HEARD.lock().unwrap().push((ctx as usize, filled(room, fill, fill_ctx)));
     }
 
     fn heard(core: usize, addr: &str) -> usize {
@@ -587,7 +708,7 @@ mod tests {
     fn every_core_hears_the_process_midi_and_it_stays_while_any_core_does() {
         HEARD.lock().unwrap().clear();
         // SAFETY: callbacks that outlive the handles, and no app name.
-        let make = |core: usize| unsafe { clockwork_midi_create(ptr::null_mut(), ptr::without_provenance_mut(core), heard_by, no_clock, no_transport, ptr::null()) };
+        let make = |core: usize| unsafe { clockwork_midi_create(ptr::null_mut(), ptr::without_provenance_mut(core), heard_by, event_heard_by, no_clock, no_transport, ptr::null()) };
         let (a, b) = (make(1), make(2));
         assert!(!a.is_null() && !b.is_null());
 

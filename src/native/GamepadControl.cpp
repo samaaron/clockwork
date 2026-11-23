@@ -13,7 +13,8 @@
 #include "SubscribeAck.h"
 #include "clockwork_gamepad.h"
 #include "clockwork_config.h"   // clockwork_log
-#include "lanes/lanes.h"        // clockwork_ingress_write: an event enters like any other
+#include "EventIngress.h"       // an event enters the in ring where it is to lie
+#include "lanes/lanes.h"        // clockwork_ingress_write: a change in what is there enters like any other
 #include "osc/OscReceivedElements.h"
 
 #include <atomic>
@@ -26,7 +27,7 @@ ClockworkCore* GamepadControl::core() const { return mEgress ? mEgress->core() :
 void GamepadControl::init(OscEgress* egress) {
     mEgress = egress;
     if (!mGamepad) {
-        mGamepad = clockwork_gamepad_create(this, &GamepadControl::emitCb);
+        mGamepad = clockwork_gamepad_create(this, &GamepadControl::emitCb, &GamepadControl::eventCb);
     }
 }
 
@@ -91,8 +92,10 @@ static void logGamepadDevicesChange(ClockworkCore* core, const uint8_t* data, ui
     clockwork_log(core, "[gamepad] devices: [%s]", names.c_str());
 }
 
-// A reply goes to its caller. An event goes into the IN ring, to be answered
-// on the audio thread by clockwork_event_route — see MidiControl::emitCb.
+// A reply goes to its caller. A devices change goes into the IN ring from its
+// bytes, and what a pad did (eventCb) is written there where it lies, to be
+// answered on the audio thread by clockwork_event_route — see
+// MidiControl::emitCb.
 void GamepadControl::emitCb(void* ctx, int32_t kind, const uint8_t* osc, uint32_t len) {
     auto* self = static_cast<GamepadControl*>(ctx);
     if (!self->mEgress) return;
@@ -106,4 +109,10 @@ void GamepadControl::emitCb(void* ctx, int32_t kind, const uint8_t* osc, uint32_
                               reinterpret_cast<const char*>(osc));
         }
     }
+}
+
+void GamepadControl::eventCb(void* ctx, uint32_t room, ClockworkFill fill, void* fillCtx) {
+    auto* self = static_cast<GamepadControl*>(ctx);
+    if (!self->mEgress) return;
+    clockwork_event_ingress(self->mEgress->core(), room, fill, fillCtx, self->mDroppedLog, "gamepad");
 }

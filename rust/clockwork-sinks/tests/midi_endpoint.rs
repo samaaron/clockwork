@@ -77,6 +77,7 @@ fn a_midi_sink_delivers_to_a_virtual_port() {
     // The subsystem, which is what publishes the shared MidiIo the endpoint
     // finds. Its callbacks are never exercised by an output-only test.
     extern "C" fn emit(_c: *mut c_void, _k: i32, _d: *const u8, _l: u32) {}
+    extern "C" fn event(_c: *mut c_void, _room: u32, _fill: clockwork_midi::ffi::FillFn, _f: *mut c_void) {}
     extern "C" fn clock(_c: *mut c_void, _n: *const u8, _nl: u32,
                         _r: *const u8, _rl: u32, _t: u64) {}
     extern "C" fn transport(_c: *mut c_void, _n: *const u8, _nl: u32,
@@ -84,7 +85,7 @@ fn a_midi_sink_delivers_to_a_virtual_port() {
     let app = CString::new("clockwork-sink-test").unwrap();
     // SAFETY: `app` is a NUL-terminated string that outlives the call.
     let midi = unsafe { clockwork_midi::ffi::clockwork_midi_create(
-        std::ptr::null_mut(), core::ptr::null_mut(), emit, clock, transport, app.as_ptr()) };
+        std::ptr::null_mut(), core::ptr::null_mut(), emit, event, clock, transport, app.as_ptr()) };
     assert!(!midi.is_null(), "the MIDI subsystem must start");
 
     // The handle is the normalised, dedup'd form of the OS port name, so it is

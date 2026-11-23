@@ -34,14 +34,29 @@ typedef struct ClockworkGamepad ClockworkGamepad;
 #define CLOCKWORK_GAMEPAD_EMIT_BROADCAST 0 /* fan out to the /clockwork/gamepad/notify audience */
 #define CLOCKWORK_GAMEPAD_EMIT_REPLY 1     /* reply to the current caller */
 
-/* Emit an OSC packet to the engine: BROADCAST for "/clockwork/gamepad/in/" events + the
- * "/clockwork/gamepad/devices" push, REPLY for "/clockwork/gamepad/devices.reply". `osc`/`len` are
- * only valid for the duration of the call. May fire on the poll thread. */
+/* Emit an OSC packet to the engine: BROADCAST for the "/clockwork/gamepad/devices"
+ * push, REPLY for "/clockwork/gamepad/devices.reply". `osc`/`len` are only
+ * valid for the duration of the call. May fire on the poll thread. */
 typedef void (*clockwork_gamepad_emit_fn)(void* ctx, int32_t kind, const uint8_t* osc, uint32_t len);
 
-/* Register a core's callback (starting the process-global device IO on first
- * use). `ctx` and the callback must outlive the instance. NULL on failure. */
-ClockworkGamepad* clockwork_gamepad_create(void* ctx, clockwork_gamepad_emit_fn emit);
+/* Write one event into `room` bytes at `at`; the bytes written, 0 for none.
+ * Called with the in ring's writer lock held: it writes and does nothing
+ * else. It may be called more than once for one event, or not at all, and
+ * writes the same bytes each time. */
+typedef uint32_t (*clockwork_gamepad_fill_fn)(void* fill_ctx, uint8_t* at, uint32_t room);
+
+/* A "/clockwork/gamepad/in/" event for the engine's in ring, written where it
+ * is to lie: the engine reserves `room` bytes, has `fill` write the event
+ * into them and commits what it wrote (lanes.h,
+ * clockwork_ingress_write_with). `fill`/`fill_ctx` are only valid for the
+ * duration of the call. Fires on the poll thread. */
+typedef void (*clockwork_gamepad_event_fn)(void* ctx, uint32_t room,
+                                           clockwork_gamepad_fill_fn fill, void* fill_ctx);
+
+/* Register a core's callbacks (starting the process-global device IO on first
+ * use). `ctx` and the callbacks must outlive the instance. NULL on failure. */
+ClockworkGamepad* clockwork_gamepad_create(void* ctx, clockwork_gamepad_emit_fn emit,
+                                           clockwork_gamepad_event_fn event);
 
 /* Deregister the core; no callback reaches it after this returns. The last
  * core's also stops all rumble, and the poll thread parks until the next

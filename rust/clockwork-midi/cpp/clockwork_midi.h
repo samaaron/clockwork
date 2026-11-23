@@ -38,10 +38,24 @@ typedef struct ClockworkMidi ClockworkMidi;
 #define CLOCKWORK_MIDI_EMIT_BROADCAST 0 /* fan out to the /clockwork/midi/notify audience */
 #define CLOCKWORK_MIDI_EMIT_REPLY 1     /* reply to the current caller */
 
-/* Emit an OSC packet to the engine: BROADCAST for "/clockwork/midi/in/" events + the
- * "/clockwork/midi/ports" push, REPLY for "/clockwork/midi/ports.reply". `osc`/`len` are only valid
+/* Emit an OSC packet to the engine: BROADCAST for the "/clockwork/midi/ports"
+ * push, REPLY for "/clockwork/midi/ports.reply". `osc`/`len` are only valid
  * for the duration of the call. */
 typedef void (*clockwork_midi_emit_fn)(void* ctx, int32_t kind, const uint8_t* osc, uint32_t len);
+
+/* Write one event into `room` bytes at `at`; the bytes written, 0 for none.
+ * Called with the in ring's writer lock held: it writes and does nothing
+ * else. It may be called more than once for one event, or not at all, and
+ * writes the same bytes each time. */
+typedef uint32_t (*clockwork_midi_fill_fn)(void* fill_ctx, uint8_t* at, uint32_t room);
+
+/* A "/clockwork/midi/in/" event for the engine's in ring, written where it is
+ * to lie: the engine reserves `room` bytes, has `fill` write the event into
+ * them and commits what it wrote (lanes.h, clockwork_ingress_write_with).
+ * `fill`/`fill_ctx` are only valid for the duration of the call. Fires on the
+ * thread the event arrived on, which for a port is the system's MIDI thread. */
+typedef void (*clockwork_midi_event_fn)(void* ctx, uint32_t room,
+                                        clockwork_midi_fill_fn fill, void* fill_ctx);
 
 /* One MIDI clock pulse (0xF8) for an input port → ClockworkClock, which anchors the
  * timeline beat on the pulse count (tempo is estimated engine-side).
@@ -68,6 +82,7 @@ typedef void (*clockwork_midi_transport_fn)(void* ctx,
  * to "clockwork". Copied — need not outlive the call. */
 ClockworkMidi* clockwork_midi_create(struct ClockworkCore* core, void* ctx,
                        clockwork_midi_emit_fn emit,
+                       clockwork_midi_event_fn event,
                        clockwork_midi_clock_fn clock,
                        clockwork_midi_transport_fn transport,
                        const char* app_name);

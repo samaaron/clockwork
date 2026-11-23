@@ -45,6 +45,8 @@ private:
     // clockwork_midi_* host callbacks (ctx = this). clock/transport carry the
     // normalised port handle + raw OS name (length-delimited, not NUL-term).
     static void    emitCb(void* ctx, int32_t kind, const uint8_t* osc, uint32_t len);
+    // An inbound event, written into the in ring where it is to lie (EventIngress.h).
+    static void    eventCb(void* ctx, uint32_t room, uint32_t (*fill)(void*, uint8_t*, uint32_t), void* fillCtx);
     static void    clockCb(void* ctx, const uint8_t* norm, uint32_t normLen,
                            const uint8_t* raw, uint32_t rawLen, uint64_t tsUs);
     static void    transportCb(void* ctx, const uint8_t* norm, uint32_t normLen,

@@ -525,6 +525,8 @@ struct MidiCtx {
     std::atomic<int>         pulses{0};
 };
 
+void event_cb(void*, uint32_t, clockwork_midi_fill_fn, void*) {}   // what the port sends back is counted by clock_cb
+
 void emit_cb(void* ctx, int32_t, const uint8_t* osc, uint32_t len) {
     auto* c = static_cast<MidiCtx*>(ctx);
     try {
@@ -587,7 +589,7 @@ void sendOsc(ClockworkMidi* h, const char* addr, const char* arg, int32_t on) {
 TEST_CASE("midi clock: a generated tick reaches a real port and comes back",
           "[.midi-hardware][midi][clock][device]") {
     MidiCtx ctx;
-    ClockworkMidi* midi = clockwork_midi_create(nullptr, &ctx, emit_cb, clock_cb, transport_cb,
+    ClockworkMidi* midi = clockwork_midi_create(nullptr, &ctx, emit_cb, event_cb, clock_cb, transport_cb,
                                   "clockwork-clock-e2e");
     REQUIRE(midi);
     // Enumerate first: creation does not scan the OS registry, so asking for

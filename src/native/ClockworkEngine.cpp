@@ -1111,6 +1111,7 @@ void ClockworkEngine::initEngine(const Config& cfg) {
                     case InRingWrite::Full:
                         return ClockworkDrainVerdict::Retain;   // IN ring full — retry next wake
                     case InRingWrite::NoInstance:
+                    case InRingWrite::Unfilled:             // a frame of no bytes: nothing to write, ever
                         return ClockworkDrainVerdict::Consume;  // refused at the door, once: done with
                     case InRingWrite::TooBig:
                         // Larger than the IN ring always takes (a profile whose IN ring is smaller than the

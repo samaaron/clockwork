@@ -100,8 +100,12 @@ pub fn encode_button(pad: &str, button: &str, pressed: bool, value: f32) -> Resu
 
 /// [`write_button`], as a `Vec`.
 pub fn encode_button_at(pad: &str, button: &str, pressed: bool, value: f32, when: u64) -> Result<Vec<u8>, Unwritable> {
-    let room = wire::room(BUTTON, 5, wire::text_room(pad) + wire::text_room(button) + 4 + 4 + 8);
-    wire::to_vec(room, |buf| write_button(buf, pad, button, pressed, value, when))
+    wire::to_vec(button_room(pad, button), |buf| write_button(buf, pad, button, pressed, value, when))
+}
+
+/// The room [`write_button`] takes at most, whatever the moment on it.
+pub fn button_room(pad: &str, button: &str) -> usize {
+    wire::room(BUTTON, 5, wire::text_room(pad) + wire::text_room(button) + 4 + 4 + 8)
 }
 
 /// `/clockwork/gamepad/in/axis <pad:s> <axis:s> <value:f> [when:t]` — value is
@@ -121,8 +125,12 @@ pub fn encode_axis(pad: &str, axis: &str, value: f32) -> Result<Vec<u8>, Unwrita
 
 /// [`write_axis`], as a `Vec`.
 pub fn encode_axis_at(pad: &str, axis: &str, value: f32, when: u64) -> Result<Vec<u8>, Unwritable> {
-    let room = wire::room(AXIS, 4, wire::text_room(pad) + wire::text_room(axis) + 4 + 8);
-    wire::to_vec(room, |buf| write_axis(buf, pad, axis, value, when))
+    wire::to_vec(axis_room(pad, axis), |buf| write_axis(buf, pad, axis, value, when))
+}
+
+/// The room [`write_axis`] takes at most, whatever the moment on it.
+pub fn axis_room(pad: &str, axis: &str) -> usize {
+    wire::room(AXIS, 4, wire::text_room(pad) + wire::text_room(axis) + 4 + 8)
 }
 
 /// `<address> <n:i> [name:s enabled:i]*`: the pads there are, to `address`.

@@ -1,43 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
 // Copyright (c) 2026 Sam Aaron
 //! `clockwork_osc::wire` reads and writes without allocating: counted, with an
-//! allocator that counts. One test in this file, so nothing else in the
-//! process allocates while it counts.
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicUsize, Ordering};
-
+//! allocator that counts (clockwork-corpus).
+use clockwork_corpus::counting::{allocations_in, Counting};
 use clockwork_osc::wire::{Arg, BundleWriter, Message, Packet, Writer};
 use clockwork_osc::Timetag;
 
-struct Counting;
-static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
-
-// SAFETY: every call goes to the system allocator unchanged; this only counts.
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-        // SAFETY: the caller's contract, passed on.
-        unsafe { System.alloc(layout) }
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        // SAFETY: the caller's contract, passed on.
-        unsafe { System.dealloc(ptr, layout) }
-    }
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-        // SAFETY: the caller's contract, passed on.
-        unsafe { System.realloc(ptr, layout, size) }
-    }
-}
-
 #[global_allocator]
 static COUNTING: Counting = Counting;
-
-fn allocations_in(work: impl FnOnce()) -> usize {
-    let before = ALLOCATIONS.load(Ordering::Relaxed);
-    work();
-    ALLOCATIONS.load(Ordering::Relaxed) - before
-}
 
 /// Every argument of a message, arrays entered, folded into one number so the reading is not optimised away.
 fn read(args: clockwork_osc::wire::Args<'_>) -> u64 {

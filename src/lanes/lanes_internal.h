@@ -104,4 +104,9 @@ bool clockwork_egress_nrt_write_parts(ClockworkCore* core, uint32_t token,
 // engine's own that holds a message while the ring is full and must not hold
 // one that has been answered — a shm peer's plane.
 InRingWrite clockwork_ingress_write_status(ClockworkCore* core, const uint8_t* osc, uint32_t len, uint32_t token);
+
+// clockwork_ingress_write_with, saying which refusal it made, for a caller
+// that tells a full ring (a moment) from a message too big for it (for good).
+InRingWrite clockwork_ingress_write_with_status(ClockworkCore* core, uint32_t max_bytes, uint32_t token,
+                                                ClockworkFill fill, void* ctx);
 #endif

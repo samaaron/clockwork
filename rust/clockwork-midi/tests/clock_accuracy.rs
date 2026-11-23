@@ -46,6 +46,14 @@ extern "C" fn emit_cb(ctx: *mut c_void, _kind: i32, osc: *const u8, len: u32) {
     let (c, bytes) = unsafe { (&*ctx.cast::<Ctx>(), std::slice::from_raw_parts(osc, len as usize)) };
     c.events.lock().unwrap().push(bytes.to_vec());
 }
+extern "C" fn event_cb(ctx: *mut c_void, room: u32, fill: clockwork_midi::ffi::FillFn, fill_ctx: *mut c_void) {
+    // SAFETY: `ctx` is the leaked `Ctx` from `new_ctx`.
+    let c = unsafe { &*ctx.cast::<Ctx>() };
+    let mut bytes = vec![0u8; room as usize];
+    let wrote = fill(fill_ctx, bytes.as_mut_ptr(), room) as usize;
+    bytes.truncate(wrote);
+    c.events.lock().unwrap().push(bytes);
+}
 extern "C" fn clock_cb(ctx: *mut c_void, norm: *const u8, norm_len: u32,
                        _raw: *const u8, _raw_len: u32, ts_us: u64) {
     // SAFETY: as `emit_cb`; the name is the callback's (pointer, length).
@@ -65,7 +73,7 @@ fn new_ctx() -> *mut Ctx {
 fn create(ctx: *mut Ctx) -> *mut ClockworkMidi {
     // SAFETY: a null app name is allowed by the contract; the callbacks and
     // ctx outlive the subsystem, which the test closes before returning.
-    unsafe { clockwork_midi_create(std::ptr::null_mut(), ctx.cast::<c_void>(), emit_cb, clock_cb, transport_cb, std::ptr::null()) }
+    unsafe { clockwork_midi_create(std::ptr::null_mut(), ctx.cast::<c_void>(), emit_cb, event_cb, clock_cb, transport_cb, std::ptr::null()) }
 }
 
 /// Resolve a virtual port's bare name to the handle the subsystem enumerates.

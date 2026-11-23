@@ -445,6 +445,7 @@ ClockworkStatus clockwork_client_send(ClockworkClient* handle,
         case InRingWrite::Written:    return CLOCKWORK_OK;
         case InRingWrite::NoInstance: return CLOCKWORK_E_NO_INSTANCE;
         case InRingWrite::TooBig:     return CLOCKWORK_E_TOO_BIG;
+        case InRingWrite::Unfilled:   return CLOCKWORK_E_ARG;   // a message of no bytes
         case InRingWrite::Full:       break;
     }
     return CLOCKWORK_E_FULL;

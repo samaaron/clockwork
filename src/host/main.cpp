@@ -94,6 +94,7 @@ void osc_dropped_noop(void*, uint32_t) {}
 
 #ifdef CLOCKWORK_WITH_MIDI
 void midi_emit_noop(void*, int32_t, const uint8_t*, uint32_t) {}
+void midi_event_noop(void*, uint32_t, clockwork_midi_fill_fn, void*) {}
 void midi_clock_noop(void*, const uint8_t*, uint32_t, const uint8_t*, uint32_t, uint64_t) {}
 void midi_transport_noop(void*, const uint8_t*, uint32_t, const uint8_t*, uint32_t, int32_t, double) {}
 #endif
@@ -137,7 +138,7 @@ int main(int argc, char** argv) {
     }
 
 #ifdef CLOCKWORK_WITH_MIDI
-    ClockworkMidi* midi = clockwork_midi_create(nullptr, nullptr, midi_emit_noop, midi_clock_noop, midi_transport_noop, nullptr);
+    ClockworkMidi* midi = clockwork_midi_create(nullptr, nullptr, midi_emit_noop, midi_event_noop, midi_clock_noop, midi_transport_noop, nullptr);
 #endif
 
     clockwork_host::SendOsc sendOsc =

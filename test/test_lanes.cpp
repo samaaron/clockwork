@@ -30,6 +30,8 @@
 #include "RingBufferWriter.h"       // inject frames for walker/drain tests
 #include "LanesFixture.h"          // a core for the egress calls
 #include "core_state.h"            // the core's arena
+#include "native/EventIngress.h"   // what a subsystem's event callback does
+#include "OscTestUtils.h"
 
 #include <atomic>
 #include <cstring>
@@ -445,6 +447,186 @@ TEST_CASE("lanes ABI: clockwork_ingress_write frames a message onto the IN ring"
     REQUIRE(frames == 1);
     REQUIRE(gotSrc == 7);
     REQUIRE(gotPayload == std::vector<uint8_t>(msg, msg + sizeof(msg)));
+}
+
+// ── Written where it lies (clockwork_ingress_write_with) ─────────────────────
+
+namespace {
+
+// What the in ring of `arena` holds, drained: each frame's token and bytes.
+struct InFrame { uint32_t token; std::vector<uint8_t> osc; };
+std::vector<InFrame> drainIn(LanesArena& arena) {
+    std::vector<InFrame> frames;
+    ClockworkDrainState st;
+    clockwork_drain_ring(
+        arena.base + clockwork::kDefaultLayout.in_ring_start, clockwork::kDefaultLayout.profile.in_ring_bytes,
+        &arena.cursors->in_head, &arena.cursors->in_tail, st, ClockworkDrainMetrics{}, 0,
+        [&](uint32_t src, const uint8_t* p, uint32_t n, uint32_t) {
+            frames.push_back({ src, std::vector<uint8_t>(p, p + n) });
+            return ClockworkDrainVerdict::Consume;
+        });
+    return frames;
+}
+
+// A fill that writes `osc` if there is room for it, and counts its calls and
+// whether the ring's writer lock was held as it ran.
+struct Filler {
+    std::vector<uint8_t> osc;
+    RingCursors*         cursors = nullptr;
+    uint32_t             claims = 0;       // answered instead of the bytes written, when not 0
+    int                  calls = 0;
+    bool                 lockHeld = false;
+    static uint32_t fill(void* ctx, uint8_t* at, uint32_t room) {
+        auto* f = static_cast<Filler*>(ctx);
+        f->calls++;
+        if (f->cursors) f->lockHeld = f->cursors->in_write_lock.load() != 0;
+        if (f->osc.size() > room) return 0;
+        std::memcpy(at, f->osc.data(), f->osc.size());
+        return f->claims ? f->claims : static_cast<uint32_t>(f->osc.size());
+    }
+};
+
+std::vector<uint8_t> bytesOf(const char* address) {
+    std::vector<uint8_t> b(address, address + std::strlen(address));
+    do b.push_back(0); while (b.size() % 4);
+    b.insert(b.end(), { ',', 0, 0, 0 });
+    return b;
+}
+
+} // namespace
+
+TEST_CASE("lanes ABI: a message written in place lies in the IN ring as one written from bytes does", "[lanes][abi]") {
+    LanesArena arena;
+    Filler f{ bytesOf("/dummy/ping"), arena.cursors };
+    // Room for more than it writes: the frame is what was written, no more.
+    REQUIRE(clockwork_ingress_write_with(lanes_test::core(), static_cast<uint32_t>(f.osc.size()) + 40, 7, Filler::fill, &f));
+    CHECK(f.calls == 1);
+    CHECK(f.lockHeld);                                  // written under the ring's writer lock
+    CHECK(arena.cursors->in_write_lock.load() == 0);    // and the lock given back
+    REQUIRE(clockwork_ingress_write(lanes_test::core(), f.osc.data(), static_cast<uint32_t>(f.osc.size()), 7));
+
+    const auto frames = drainIn(arena);
+    REQUIRE(frames.size() == 2);
+    CHECK(frames[0].token == 7);
+    CHECK(frames[0].osc == f.osc);
+    CHECK(frames[1].osc == frames[0].osc);
+}
+
+TEST_CASE("lanes ABI: a fill that writes nothing, or claims more than its room, leaves the IN ring untouched and unlocked", "[lanes][abi]") {
+    LanesArena arena;
+    const int32_t head0 = arena.cursors->in_head.load(), seq0 = arena.cursors->in_sequence.load();
+
+    Filler nothing{ bytesOf("/dummy/ping") };
+    REQUIRE_FALSE(clockwork_ingress_write_with(lanes_test::core(), 8, 0, Filler::fill, &nothing));   // 8 is no room for it
+    CHECK(nothing.calls == 1);
+
+    Filler liar{ bytesOf("/dummy/ping") };
+    liar.claims = 64;
+    REQUIRE_FALSE(clockwork_ingress_write_with(lanes_test::core(), 32, 0, Filler::fill, &liar));
+
+    CHECK(arena.cursors->in_head.load() == head0);
+    CHECK(arena.cursors->in_sequence.load() == seq0);   // no sequence taken: nothing reads as lost
+    CHECK(arena.cursors->in_write_lock.load() == 0);
+
+    // The ring still takes the next message.
+    Filler good{ bytesOf("/dummy/ping") };
+    REQUIRE(clockwork_ingress_write_with(lanes_test::core(), 32, 3, Filler::fill, &good));
+    const auto frames = drainIn(arena);
+    REQUIRE(frames.size() == 1);
+    CHECK(frames[0].osc == good.osc);
+}
+
+TEST_CASE("lanes ABI: a message written in place is refused, unfilled, by a full ring, by one too small, and without its arguments", "[lanes][abi]") {
+    LanesArena arena;
+    Filler f{ bytesOf("/dummy/ping") };
+    const uint32_t ring = clockwork::kDefaultLayout.profile.in_ring_bytes;
+
+    // More than the ring ever takes.
+    REQUIRE_FALSE(clockwork_ingress_write_with(lanes_test::core(), ring, 0, Filler::fill, &f));
+    // No room, no fill.
+    REQUIRE_FALSE(clockwork_ingress_write_with(lanes_test::core(), 0, 0, Filler::fill, &f));
+    REQUIRE_FALSE(clockwork_ingress_write_with(lanes_test::core(), 32, 0, nullptr, &f));
+    CHECK(f.calls == 0);
+
+    // A full ring: filled to where the next reservation fails.
+    const std::vector<uint8_t> big(ring_max_message(ring) / 2, 0);
+    Filler filler{ big };
+    while (clockwork_ingress_write_with(lanes_test::core(), static_cast<uint32_t>(big.size()), 0, Filler::fill, &filler)) {}
+    const int before = f.calls;
+    REQUIRE_FALSE(clockwork_ingress_write_with(lanes_test::core(), static_cast<uint32_t>(big.size()), 0, Filler::fill, &f));
+    CHECK(f.calls == before);                           // never asked to write
+    CHECK(arena.cursors->in_write_lock.load() == 0);
+}
+
+TEST_CASE("lanes ABI: a guest's message written in place is refused while there is no instance, and clockwork's own is taken", "[lanes][abi]") {
+    LanesArena arena;
+    arenaInstanceDown(arena.base);
+    Filler guest{ bytesOf("/dummy/ping") };
+    REQUIRE_FALSE(clockwork_ingress_write_with(lanes_test::core(), 32, 9, Filler::fill, &guest));
+    CHECK(arena.cursors->in_write_lock.load() == 0);
+    CHECK(drainIn(arena).empty());
+    // The refusal is said to the token that sent it, with the address refused, as a write from bytes says it.
+    Captured cap;
+    REQUIRE(clockwork_egress_nrt_drain(lanes_test::core(), capture, &cap, 0) == 1);
+    CHECK(cap.token == 9);
+    CHECK(std::string(reinterpret_cast<const char*>(cap.osc.data())) == CLOCKWORK_SYS("error"));
+    CHECK(std::string(reinterpret_cast<const char*>(cap.osc.data()) + 28) == "/dummy/ping");
+
+    Filler own{ bytesOf(CLOCKWORK_SYS("ping")) };
+    REQUIRE(clockwork_ingress_write_with(lanes_test::core(), 32, 9, Filler::fill, &own));
+    CHECK(drainIn(arena).size() == 1);
+    arenaInstanceUp(arena.base);
+}
+
+TEST_CASE("lanes ABI: a control verb is not written in place while the control ring is served", "[lanes][abi]") {
+    LanesArena arena;
+    Filler verb{ bytesOf(CLOCKWORK_SYS("notify")) };
+    // Unserved, a control verb rides the in ring, as one written from bytes does.
+    REQUIRE(clockwork_ingress_write_with(lanes_test::core(), 32, 0, Filler::fill, &verb));
+    CHECK(drainIn(arena).size() == 1);
+    // Served, its place is the control ring, which this door does not write: refused, and the in ring left as it was.
+    clockwork_control_serve(lanes_test::core(), 1);
+    const bool wrote = clockwork_ingress_write_with(lanes_test::core(), 32, 0, Filler::fill, &verb);
+    clockwork_control_serve(lanes_test::core(), 0);
+    REQUIRE_FALSE(wrote);
+    CHECK(arena.cursors->in_write_lock.load() == 0);
+    CHECK(drainIn(arena).empty());
+}
+
+// What a subsystem's event callback does with an event (native/EventIngress.h).
+TEST_CASE("event ingress: an event is written in place, and one the ring does not take is said with its address, as often as allowed", "[lanes][abi][event]") {
+    lanes_test::boot();   // a core says its lines on its rings once it is up; before, to the console
+    LanesArena arena;
+    clockwork::LogLimit dropped = clockwork::LogLimit::first(1);
+    Filler note{ bytesOf(CLOCKWORK_SYS("midi/in/note_on")) };
+    const auto lines = [] {
+        std::vector<std::string> said;
+        auto frames = lanes_test::drainRt();
+        for (auto& f : lanes_test::drainNrt()) frames.push_back(std::move(f));
+        for (const auto& f : frames) {
+            if (std::string(reinterpret_cast<const char*>(f.data.data())) != CLOCKWORK_SYS("debug")) continue;
+            const auto r = osc_test::parseReply(f.data.data(), static_cast<uint32_t>(f.data.size()));
+            said.push_back(r.argString(0));
+        }
+        return said;
+    };
+    lines();
+
+    clockwork_event_ingress(lanes_test::core(), static_cast<uint32_t>(note.osc.size()), Filler::fill, &note, dropped, "MIDI");
+    const auto frames = drainIn(arena);
+    REQUIRE(frames.size() == 1);
+    CHECK(frames[0].osc == note.osc);
+    CHECK(frames[0].token == 0);
+    CHECK(lines().empty());
+
+    // More room than the ring ever gives: dropped, and said once.
+    const uint32_t tooBig = clockwork::kDefaultLayout.profile.in_ring_bytes;
+    clockwork_event_ingress(lanes_test::core(), tooBig, Filler::fill, &note, dropped, "MIDI");
+    clockwork_event_ingress(lanes_test::core(), tooBig, Filler::fill, &note, dropped, "MIDI");
+    CHECK(drainIn(arena).empty());
+    const auto said = lines();
+    REQUIRE(said.size() == 1);
+    CHECK(said[0] == std::string("WARNING: MIDI event ") + CLOCKWORK_SYS("midi/in/note_on") + " dropped — IN ring full");
 }
 
 TEST_CASE("lanes ABI: NRT egress write -> drain round-trips token and payload", "[lanes][abi]") {

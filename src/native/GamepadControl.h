@@ -38,6 +38,8 @@ private:
     // clockwork_gamepad_* host callback (ctx = this). May fire on the subsystem's
     // poll thread; the egress producer side is thread-safe.
     static void emitCb(void* ctx, int32_t kind, const uint8_t* osc, uint32_t len);
+    // An inbound event, written into the in ring where it is to lie (EventIngress.h).
+    static void eventCb(void* ctx, uint32_t room, uint32_t (*fill)(void*, uint8_t*, uint32_t), void* fillCtx);
 
     ClockworkGamepad* mGamepad = nullptr;
     OscEgress* mEgress  = nullptr;

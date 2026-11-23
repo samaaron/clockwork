@@ -5,7 +5,8 @@
 //! evdev / XInput) and Apple's GameController framework (`gc.rs`: macOS) —
 //! behind one `GamepadIo` interface consumed by `ffi.rs`.
 
-use crate::schema::{encode_axis_at, encode_button_at};
+use crate::schema::{axis_room, button_room, write_axis, write_button};
+use clockwork_osc::wire::Unwritable;
 use crate::state::{axis_name, button_name, wire_name, PadEvent};
 
 // Stable handle assignment is shared protocol logic — the same rule names
@@ -101,15 +102,24 @@ impl Out {
         }
     }
 
-    /// A button or axis event's `/clockwork/gamepad/in/*` packet, carrying its
-    /// moment as the trailing timetag, as the web's does. None for a devices
-    /// change, whose payload is the registry's.
-    pub fn encode(&self) -> Option<Vec<u8>> {
+    /// The room a button or axis event's `/clockwork/gamepad/in/*` packet
+    /// takes at most: what to reserve before [`Out::write`]. None for a
+    /// devices change, whose payload is the registry's.
+    pub fn room(&self) -> Option<usize> {
         match self {
-            Out::Button { handle, name, pressed, value, when } =>
-                encode_button_at(handle, name, *pressed, *value, *when).ok(),
-            Out::Axis { handle, name, value, when } =>
-                encode_axis_at(handle, name, *value, *when).ok(),
+            Out::Button { handle, name, .. } => Some(button_room(handle, name)),
+            Out::Axis { handle, name, .. } => Some(axis_room(handle, name)),
+            Out::DevicesChanged => None,
+        }
+    }
+
+    /// A button or axis event's packet, written into `buf`, carrying its
+    /// moment as the trailing timetag, as the web's does. None for a devices
+    /// change.
+    pub fn write<'b>(&self, buf: &'b mut [u8]) -> Option<Result<&'b [u8], Unwritable>> {
+        match self {
+            Out::Button { handle, name, pressed, value, when } => Some(write_button(buf, handle, name, *pressed, *value, *when)),
+            Out::Axis { handle, name, value, when } => Some(write_axis(buf, handle, name, *value, *when)),
             Out::DevicesChanged => None,
         }
     }
@@ -169,10 +179,11 @@ mod tests {
             Out::from_pad_event("p", PadEvent::Button { idx: 0, pressed: true, value: 1.0 }, when),
             Out::from_pad_event("p", PadEvent::Axis { idx: 0, value: 0.5 }, when),
         ] {
-            let bytes = out.encode().unwrap();
-            let m = Message::parse(&bytes).unwrap();
+            let mut buf = [0u8; 128];
+            let bytes = out.write(&mut buf).unwrap().unwrap();
+            let m = Message::parse(bytes).unwrap();
             assert_eq!(m.args().last(), Some(Arg::TimeTag(clockwork_osc::Timetag::from_ntp(when))), "{}", m.address());
         }
-        assert!(Out::DevicesChanged.encode().is_none());
+        assert!(Out::DevicesChanged.room().is_none() && Out::DevicesChanged.write(&mut [0u8; 8]).is_none());
     }
 }

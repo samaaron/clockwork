@@ -287,7 +287,7 @@ waiting on, so these are the rules a client may rely on:
    |---|---|---|
    | `clockwork_client_send`, and `clockwork_client_send_begin`/`_commit` at the commit (C, Rust, the shm peers) | the status is the word | `CLOCKWORK_E_NO_INSTANCE` / `Error::NoInstance` |
    | `ClockworkEngine::ingest` (every socket transport, `sendOSC`, the NIF) | `/clockwork/error`, with its token | the status |
-   | `clockwork_ingress_write` (the lanes ABI) | `/clockwork/error` on the NRT egress, with its token | `false` |
+   | `clockwork_ingress_write`, and `clockwork_ingress_write_with` once its message is written (the lanes ABI) | `/clockwork/error` on the NRT egress, with its token | `false` |
    | `OscChannel.send` (the browser) | `/clockwork/error` through the client's inbound path, from the main thread's channel; `onRefused` and `lastRefusal` on any channel | `false` |
 
    A refusal at a door that finds no room on clockwork's ring is lost, and

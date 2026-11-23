@@ -38,10 +38,10 @@ use crate::io::{Out, Registry};
 use crate::schema::{
     decode_out, encode_devices, encode_devices_reply, OutCommand,
 };
-// Emit-callback shape (here delivering `/clockwork/gamepad/in/*` + `/clockwork/gamepad/devices*`
-// packets), kind codes and panic fence: shared across the subsystem C ABIs —
-// see clockwork_osc::ffi.
-pub use clockwork_osc::ffi::{no_unwind, EmitFn, EMIT_BROADCAST, EMIT_REPLY};
+// The callbacks' shapes (emit for `/clockwork/gamepad/devices*` packets, event
+// for `/clockwork/gamepad/in/*`), kind codes and panic fence: shared across
+// the subsystem C ABIs — see clockwork_osc::ffi.
+pub use clockwork_osc::ffi::{event_with, no_unwind, EmitFn, EventFn, FillFn, EMIT_BROADCAST, EMIT_REPLY};
 use clockwork_osc::Refusal;
 
 /// The host callback + opaque context, bundled and made Send/Sync so the poll
@@ -50,6 +50,7 @@ use clockwork_osc::Refusal;
 struct Host {
     ctx: *mut c_void,
     emit: EmitFn,
+    event: EventFn,
 }
 // SAFETY: `ctx` is an opaque token this crate never dereferences, only hands
 // back to the callbacks, and the C++ engine's contract is that it outlives
@@ -107,8 +108,14 @@ fn emit_all(cores: &Cores, kind: i32, osc: &[u8]) {
 
 /// One thing the pads said, to every core.
 fn deliver(cores: &Cores, registry: &Mutex<Registry>, out: &Out) {
-    match out.encode() {
-        Some(event) => emit_all(cores, EMIT_BROADCAST, &event),
+    match out.room() {
+        // A button or an axis: written where it is to lie in each core's ring.
+        Some(room) => {
+            let write = |buf: &mut [u8]| out.write(buf).and_then(Result::ok).map(<[u8]>::len);
+            for host in cores.lock().unwrap().iter() {
+                event_with(host.event, host.ctx, room, &write);
+            }
+        }
         None => {
             let rows = registry.lock().unwrap().snapshot();
             if let Ok(devices) = encode_devices(&rows) {
@@ -204,15 +211,15 @@ fn poll_loop(
 
 // ── C ABI ────────────────────────────────────────────────────────────────────
 
-/// Register a core with the gamepad subsystem: adds `emit` to the cores told
+/// Register a core with the gamepad subsystem: adds its callbacks to the cores told
 /// what the pads say (starting the process-global device IO on first use).
 /// Returns an owning pointer (null on failure); free with
-/// [`clockwork_gamepad_destroy`]. `ctx` and the callback must remain valid
+/// [`clockwork_gamepad_destroy`]. `ctx` and the callbacks must remain valid
 /// until then.
 #[no_mangle]
-pub extern "C" fn clockwork_gamepad_create(ctx: *mut c_void, emit: EmitFn) -> *mut ClockworkGamepad {
+pub extern "C" fn clockwork_gamepad_create(ctx: *mut c_void, emit: EmitFn, event: EventFn) -> *mut ClockworkGamepad {
     no_unwind(std::ptr::null_mut(), || {
-        let host = Arc::new(Host { ctx, emit });
+        let host = Arc::new(Host { ctx, emit, event });
         global().cores.lock().unwrap().push(host.clone());
         Box::into_raw(Box::new(ClockworkGamepad { host }))
     })
@@ -304,6 +311,13 @@ mod tests {
         HEARD.lock().unwrap().push((ctx as usize, bytes.to_vec()));
     }
 
+    extern "C" fn event_heard_by(ctx: *mut c_void, room: u32, fill: FillFn, fill_ctx: *mut c_void) {
+        let mut bytes = vec![0u8; room as usize];
+        let wrote = fill(fill_ctx, bytes.as_mut_ptr(), room) as usize;
+        bytes.truncate(wrote);
+        HEARD.lock().unwrap().push((ctx as usize, bytes));
+    }
+
     fn heard(core: usize, addr: &str) -> usize {
         HEARD.lock().unwrap().iter().filter(|(c, b)| *c == core && Message::parse(b).is_ok_and(|m| m.address() == addr)).count()
     }
@@ -329,7 +343,7 @@ mod tests {
     fn every_core_hears_the_process_gamepads_and_one_leaving_leaves_the_others() {
         // The tally is the module's, and the tests run at once: each counts its
         // own cores only, and none clears it.
-        let (a, b) = (clockwork_gamepad_create(ptr::without_provenance_mut(1), heard_by), clockwork_gamepad_create(ptr::without_provenance_mut(2), heard_by));
+        let (a, b) = (clockwork_gamepad_create(ptr::without_provenance_mut(1), heard_by, event_heard_by), clockwork_gamepad_create(ptr::without_provenance_mut(2), heard_by, event_heard_by));
         assert!(!a.is_null() && !b.is_null());
         let devices = clockwork_sys!("gamepad/devices");
 
@@ -352,7 +366,7 @@ mod tests {
     fn a_pad_is_heard_by_every_core_registered() {
         let cores: Cores = Mutex::new(Vec::new());
         let registry = Mutex::new(Registry::default());
-        let (a, b) = (Arc::new(Host { ctx: ptr::without_provenance_mut(11), emit: heard_by }), Arc::new(Host { ctx: ptr::without_provenance_mut(12), emit: heard_by }));
+        let (a, b) = (Arc::new(Host { ctx: ptr::without_provenance_mut(11), emit: heard_by, event: event_heard_by }), Arc::new(Host { ctx: ptr::without_provenance_mut(12), emit: heard_by, event: event_heard_by }));
         cores.lock().unwrap().extend([a.clone(), b]);
         let press = Out::from_pad_event("pad", crate::PadEvent::Button { idx: 0, pressed: true, value: 1.0 }, 0);
         let button = clockwork_sys!("gamepad/in/button");
@@ -361,5 +375,42 @@ mod tests {
         cores.lock().unwrap().retain(|h| Arc::ptr_eq(h, &a));
         deliver(&cores, &registry, &press);
         assert_eq!((heard(11, button), heard(12, button)), (2, 1));
+    }
+
+    // A button and an axis are written into the room the host reserves, as
+    // the messages `write_button` and `write_axis` make, and delivering them
+    // allocates nothing: counted, by an allocator shown to count.
+    #[global_allocator]
+    static COUNTING: clockwork_corpus::counting::Counting = clockwork_corpus::counting::Counting;
+
+    #[test]
+    fn an_event_is_written_into_the_hosts_room_without_allocating() {
+        use clockwork_corpus::counting::allocations_in;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static WROTE: AtomicUsize = AtomicUsize::new(0);
+        static ROOM: AtomicUsize = AtomicUsize::new(0);
+        static RING: Mutex<[u8; 256]> = Mutex::new([0; 256]);
+        extern "C" fn into_the_ring(_: *mut c_void, room: u32, fill: FillFn, fill_ctx: *mut c_void) {
+            let mut ring = RING.lock().unwrap();
+            assert!(room as usize <= ring.len());
+            ROOM.store(room as usize, Ordering::Relaxed);
+            WROTE.store(fill(fill_ctx, ring.as_mut_ptr(), room) as usize, Ordering::Relaxed);
+        }
+        let cores: Cores = Mutex::new(vec![Arc::new(Host { ctx: ptr::null_mut(), emit: heard_by, event: into_the_ring })]);
+        let registry = Mutex::new(Registry::default());
+        let when = 0xE000_0000_8000_0000u64;
+        let press = Out::from_pad_event("pad", crate::PadEvent::Button { idx: 0, pressed: true, value: 1.0 }, when);
+        let stick = Out::from_pad_event("pad", crate::PadEvent::Axis { idx: 0, value: -0.5 }, when);
+        // The locks are made on their first lock on macOS: before the count.
+        drop((cores.lock().unwrap(), RING.lock().unwrap()));
+        assert_eq!(allocations_in(|| drop(vec![0u8; 16])), 1, "the allocator counts");
+
+        for out in [&press, &stick] {
+            assert_eq!(allocations_in(|| deliver(&cores, &registry, out)), 0);
+            let mut made = [0u8; 256];
+            let made = out.write(&mut made).unwrap().unwrap();
+            assert_eq!(&RING.lock().unwrap()[..WROTE.load(Ordering::Relaxed)], made);
+            assert_eq!(ROOM.load(Ordering::Relaxed), made.len(), "an event with its moment on it takes exactly its room");
+        }
     }
 }

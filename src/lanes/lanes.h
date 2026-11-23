@@ -99,6 +99,27 @@ extern "C" {
  */
 bool clockwork_ingress_write(ClockworkCore* core, const uint8_t* osc, uint32_t len, uint32_t token);
 
+/* The same, for a message that is not yet bytes anywhere: room for max_bytes
+ * is reserved in the ring, fill(ctx, at, max_bytes) writes the message there
+ * and returns the bytes it wrote (0 for none), and that many are committed.
+ * Nothing is built elsewhere and copied in, so a producer on a thread that
+ * must not allocate (the system's MIDI thread) has nothing to allocate.
+ *
+ * fill RUNS WITH THE RING'S WRITER LOCK HELD, which every other producer
+ * waits on, the audio thread included: it writes its bytes and does nothing
+ * else. It is not called when the ring has no room or max_bytes is more
+ * than the ring always takes. max_bytes is an upper bound; a tight one
+ * wastes nothing (RingBufferWriter.h).
+ *
+ * False as clockwork_ingress_write is, and when fill wrote nothing or said
+ * it wrote more than max_bytes: the ring is then as it was. This door
+ * writes the in ring only. It is for events; a control verb written through
+ * it while the engine serves the control ring is refused, since its place
+ * is known only once it is written. */
+typedef uint32_t (*ClockworkFill)(void* ctx, uint8_t* at, uint32_t room);
+bool clockwork_ingress_write_with(ClockworkCore* core, uint32_t max_bytes, uint32_t token,
+                                  ClockworkFill fill, void* ctx);
+
 /* ── Egress ────────────────────────────────────────────────────────────────
  * Two single-consumer rings out of the engine:
  *
