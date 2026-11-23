@@ -664,7 +664,7 @@ mod tests {
         }
         let ring = StdMutex::new(Ring::default());
         let cores = [listener(&ring, into_the_stack), listener(&ring, into_the_stack)];
-        assert_eq!(allocations_in(|| drop(vec![0u8; 16])), 1, "the allocator counts");
+        assert!(clockwork_corpus::counting::counts(), "the allocator counts");
 
         // A std mutex on macOS is made the first time it is locked; each
         // core's is locked here first, as a port's first transport message

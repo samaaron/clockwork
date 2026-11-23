@@ -403,7 +403,7 @@ mod tests {
         let stick = Out::from_pad_event("pad", crate::PadEvent::Axis { idx: 0, value: -0.5 }, when);
         // The locks are made on their first lock on macOS: before the count.
         drop((cores.lock().unwrap(), RING.lock().unwrap()));
-        assert_eq!(allocations_in(|| drop(vec![0u8; 16])), 1, "the allocator counts");
+        assert!(clockwork_corpus::counting::counts(), "the allocator counts");
 
         for out in [&press, &stick] {
             assert_eq!(allocations_in(|| deliver(&cores, &registry, out)), 0);

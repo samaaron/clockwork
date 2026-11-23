@@ -50,6 +50,13 @@ unsafe impl GlobalAlloc for Counting {
     }
 }
 
+/// Whether this binary's allocator is [`Counting`]: one allocation, counted.
+/// An optimised build may take out an allocation that nothing looks at, and
+/// then a working counter reads 0, so the vector is hidden from the optimiser.
+pub fn counts() -> bool {
+    allocations_in(|| drop(std::hint::black_box(Vec::<u8>::with_capacity(16)))) == 1
+}
+
 /// How many times `work` allocated on this thread. Always 0 in a binary
 /// whose allocator is not [`Counting`], so a test proves the counter first.
 pub fn allocations_in(work: impl FnOnce()) -> usize {
