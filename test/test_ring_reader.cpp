@@ -641,3 +641,62 @@ TEST_CASE("RingReader: a wake while the reader is busy costs no system call", "[
     while (reader.passes() < 2 && steady_clock::now() < deadline) std::this_thread::yield();
     CHECK(reader.passes() == 2);
 }
+
+// A writer's wake and a pause can reach the reader together: it comes round
+// once, parks for the pause, and the wake is spent on getting it there. The
+// frame is still owed a pass when the pause ends, without waiting for some
+// later wake. The case holds the reader inside a pass while the frame is
+// written and the pause is asked, so both are waiting for it when it comes
+// round, however the machine schedules the threads.
+TEST_CASE("RingReader: a frame written as a pause is asked is delivered when the pause ends",
+          "[RingReader][wake]") {
+    constexpr uint32_t kSize = 4096;
+    std::vector<uint8_t> buffer(kSize, 0);
+    std::atomic<int32_t> head{0}, tail{0}, sequence{0}, writeLock{0};
+    std::atomic<int> delivered{0};
+    std::atomic<bool> held{false}, release{false};
+
+    RingReader reader("test-ringreader-pausewake");
+    reader.addDrain(buffer.data(), kSize, &head, &tail,
+        [&](uint32_t, const uint8_t*, uint32_t, uint32_t) { delivered.fetch_add(1, std::memory_order_release); },
+        RingReader::Metrics{});
+    // After the drain, so the pass it holds has already looked at the ring.
+    reader.addTask([&] {
+        held.store(true, std::memory_order_release);
+        while (!release.load(std::memory_order_acquire)) std::this_thread::yield();
+    });
+    reader.start();
+    reader.wake();
+    const auto deadline = steady_clock::now() + seconds(10);
+    while (!held.load(std::memory_order_acquire) && steady_clock::now() < deadline)
+        std::this_thread::yield();
+    REQUIRE(held.load(std::memory_order_acquire));
+
+    // The frame and its wake, while the reader is past the drain.
+    const uint32_t frame = 0xC10C;
+    REQUIRE(RingBufferWriter::write(buffer.data(), kSize, &head, &tail, &sequence, &writeLock,
+                                    &frame, sizeof frame, 1));
+    reader.wake();
+
+    // The pause, asked from another thread since it blocks until the reader
+    // parks. It wakes the reader once it has asked, so the word moving on by
+    // one says the ask is in.
+    const uint32_t woken = reader.wakeWord()->value.load(std::memory_order_seq_cst);
+    std::atomic<bool> paused{false};
+    std::thread pauser([&] { paused.store(reader.pause(), std::memory_order_release); });
+    while (reader.wakeWord()->value.load(std::memory_order_seq_cst) == woken && steady_clock::now() < deadline)
+        std::this_thread::yield();
+    REQUIRE(reader.wakeWord()->value.load(std::memory_order_seq_cst) == woken + 1);
+
+    release.store(true, std::memory_order_release);
+    pauser.join();
+    REQUIRE(paused.load(std::memory_order_acquire));
+    REQUIRE(delivered.load(std::memory_order_acquire) == 0);   // parked, not draining
+
+    // Nothing wakes the reader again: the frame is delivered by the time it
+    // is next asleep with no wake pending.
+    reader.resume();
+    while (!reader.idle() && steady_clock::now() < deadline) std::this_thread::yield();
+    REQUIRE(reader.idle());
+    CHECK(delivered.load(std::memory_order_acquire) == 1);
+}

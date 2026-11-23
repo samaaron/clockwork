@@ -134,17 +134,20 @@ void RingReader::run(const std::stop_token& stop, uint32_t seen) {
         seen = mWake->value.load(std::memory_order_seq_cst);
         if (stop.stop_requested()) break;
 
-        const uint32_t ask = mPauseRequests.value.load(std::memory_order_seq_cst);
-        if ((ask & 1u) != 0) {
+        for (uint32_t ask = mPauseRequests.value.load(std::memory_order_seq_cst); (ask & 1u) != 0;
+             ask = mPauseRequests.value.load(std::memory_order_seq_cst)) {
             // Acknowledge between drain passes — the release makes every write
             // of the pass visible to the pauser — then sleep until resume()
             // (or a stop, which resumes) moves the count on.
             mParkedAt.value.store(ask, std::memory_order_release);
             clockwork::notify(mParkedAt);
             clockwork::wait(mPauseRequests, ask);
-            continue;
         }
+        if (stop.stop_requested()) break;
 
+        // After a park too: the wake that brought the thread round to it may
+        // have been a writer's as well as the pause's, and `seen` already
+        // holds it, so the next wait would sleep on a frame still in the ring.
         pass();
     }
 }
