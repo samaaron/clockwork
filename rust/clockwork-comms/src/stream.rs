@@ -1366,8 +1366,13 @@ pub(crate) mod tests {
             let before = cap.packets.lock().unwrap().len();
             c.write_all(&frame(&osc("/again", |_| Ok(())))).unwrap();
             assert!(wait_until(|| cap.packets.lock().unwrap().len() > before));
-            seen.push(cap.packets.lock().unwrap().last().unwrap().0);
+            let id = cap.packets.lock().unwrap().last().unwrap().0;
+            seen.push(id);
             drop(c);
+            // One client at a time: the next connects once the server has
+            // seen this one go. Sooner, it is closed at accept, as the rule
+            // says, and whether it was sooner is the machine's to decide.
+            assert!(wait_until(|| cap.closed.lock().unwrap().contains(&id)), "connection {id} seen closed");
         }
         seen.dedup();
         assert_eq!(seen.len(), 3, "each connection gets a fresh id: {seen:?}");
