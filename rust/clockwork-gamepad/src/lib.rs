@@ -24,8 +24,8 @@ pub use schema::{
 };
 pub use state::{axis_name, button_name, PadEvent, PadState, AXES, BUTTONS};
 
-// The OSC codec + name normalisation are shared with clockwork-midi.
-pub use clockwork_osc::{normalize, osc};
+// Name normalisation is shared with clockwork-midi.
+pub use clockwork_osc::normalize;
 
 // Device IO + FFI run on an OS poll thread (native): gilrs on Linux/Windows,
 // Apple's GameController framework on macOS (Apple's drivers claim modern

@@ -13,7 +13,7 @@ use std::net::UdpSocket;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use clockwork_osc::{decode, encode};
+use clockwork_osc::wire::{self, Message};
 use clockwork_osc_net::ffi::{
     clockwork_osc_configure, clockwork_osc_create, clockwork_osc_destroy,
 };
@@ -24,8 +24,8 @@ static CUES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 extern "C" fn on_emit(_: *mut c_void, _: i32, osc: *const u8, len: u32) {
     // SAFETY: `osc` is readable for `len` bytes for the callback's duration.
     let bytes = unsafe { std::slice::from_raw_parts(osc, len as usize) };
-    if let Some(m) = decode(bytes) {
-        CUES.lock().unwrap().push(m.addr);
+    if let Ok(m) = Message::parse(bytes) {
+        CUES.lock().unwrap().push(m.address().to_string());
     }
 }
 extern "C" fn on_dropped(_: *mut c_void, _: u32) {}
@@ -44,7 +44,7 @@ fn the_cue_threads_sleep_until_a_datagram_and_destroy_ends_them_at_once() {
     }
 
     let sender = UdpSocket::bind(("127.0.0.1", 0)).unwrap();
-    sender.send_to(&encode("/hello", &[]), ("127.0.0.1", port)).unwrap();
+    sender.send_to(wire::message(&mut [0u8; 16], "/hello", |_| Ok(())).unwrap(), ("127.0.0.1", port)).unwrap();
     let until = Instant::now() + Duration::from_secs(30);
     while CUES.lock().unwrap().is_empty() && Instant::now() < until {
         std::thread::sleep(Duration::from_millis(1));

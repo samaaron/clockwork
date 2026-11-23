@@ -19,14 +19,13 @@ pub mod message;
 pub mod schema;
 pub mod sync;
 
-// The OSC codec + name normalisation live in the shared clockwork-osc crate
-// (also used by clockwork-gamepad), exposed under this crate's module paths.
-pub use clockwork_osc::{normalize, osc};
+// Name normalisation lives in the shared clockwork-osc crate (also used by
+// clockwork-gamepad), exposed under this crate's module path.
+pub use clockwork_osc::normalize;
 
 pub use clock::{ClockEstimator, EstimatorParams, PPQN};
 pub use message::MidiMessage;
 pub use normalize::{normalize_ports, safe_osc_name, PortInfo};
-pub use osc::{OscArg, OscMessage};
 pub use schema::{
     decode_out, encode_clock_bpm, encode_in, encode_ports, encode_ports_reply, OutCommand,
 };

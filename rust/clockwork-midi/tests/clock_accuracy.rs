@@ -24,7 +24,7 @@ use midir::os::unix::{VirtualInput, VirtualOutput};
 use midir::{MidiInput, MidiOutput};
 
 use clockwork_midi::ffi::{clockwork_midi_create, clockwork_midi_destroy, clockwork_midi_handle_osc, ClockworkMidi};
-use clockwork_midi::osc::{encode, OscArg};
+use clockwork_osc::wire::{self, Message, Unwritable, Writer};
 
 /// Host context shared with the C ABI callbacks: captures the per-0xF8 (port, ts)
 /// stream and the OSC packets the subsystem emits.
@@ -93,9 +93,10 @@ fn resolve(substr: &str, input: bool) -> String {
         })
 }
 
-fn send(h: *mut ClockworkMidi, addr: &str, args: &[OscArg]) {
-    let bytes = encode(addr, args);
-    // SAFETY: `h` is live and `bytes` is a live Vec.
+fn send(h: *mut ClockworkMidi, addr: &str, fill: impl FnOnce(&mut Writer<'_>) -> Result<(), Unwritable>) {
+    let mut buf = [0u8; 256];
+    let bytes = wire::message(&mut buf, addr, fill).unwrap();
+    // SAFETY: `h` is live and `bytes` is a live buffer.
     unsafe { clockwork_midi_handle_osc(h, bytes.as_ptr(), bytes.len() as u32) };
 }
 
@@ -119,7 +120,7 @@ fn incoming_clock_delivery() {
     let ctx = new_ctx();
     let h = create(ctx);
     let port = resolve("ss-clk-in", true);
-    send(h, clockwork_sys!("midi/in/enable"), &[OscArg::Str(port.clone()), OscArg::Int(1)]);
+    send(h, clockwork_sys!("midi/in/enable"), |w| w.str(&port)?.int(1).map(drop));
 
     let mut next = Instant::now();
     for _ in 0..240 {
@@ -161,7 +162,7 @@ fn two_ports_route_independently() {
         let vout = MidiOutput::new("ss-test").unwrap();
         conns.push(vout.create_virtual(name).unwrap());
         let port = resolve(name, true);
-        send(h, clockwork_sys!("midi/in/enable"), &[OscArg::Str(port.clone()), OscArg::Int(1)]);
+        send(h, clockwork_sys!("midi/in/enable"), |w| w.str(&port)?.int(1).map(drop));
         resolved.push(port);
     }
 
@@ -206,7 +207,7 @@ fn ramp_tracking_and_delivery_jitter() {
     let ctx = new_ctx();
     let h = create(ctx);
     let port = resolve("ss-ramp-in", true);
-    send(h, clockwork_sys!("midi/in/enable"), &[OscArg::Str(port), OscArg::Int(1)]);
+    send(h, clockwork_sys!("midi/in/enable"), |w| w.str(&port)?.int(1).map(drop));
 
     let (start_bpm, end_bpm, ramp_s) = (120.0_f64, 180.0_f64, 3.0_f64);
     let t0 = Instant::now();
@@ -264,8 +265,8 @@ fn note_round_trip_through_ffi() {
     let h = create(ctx);
     let in_port = resolve("ss-rt-in", true);
     let out_port = resolve("ss-rt-out", false);
-    send(h, clockwork_sys!("midi/in/enable"), &[OscArg::Str(in_port), OscArg::Int(1)]);
-    send(h, clockwork_sys!("midi/out/enable"), &[OscArg::Str(out_port.clone()), OscArg::Int(1)]);
+    send(h, clockwork_sys!("midi/in/enable"), |w| w.str(&in_port)?.int(1).map(drop));
+    send(h, clockwork_sys!("midi/out/enable"), |w| w.str(&out_port)?.int(1).map(drop));
 
     // IN: device sends note-on → engine emits /clockwork/midi/in/note_on.
     src.send(&[0x90, 60, 100]).unwrap();
@@ -273,7 +274,7 @@ fn note_round_trip_through_ffi() {
     send(
         h,
         clockwork_sys!("midi/out/note_on"),
-        &[OscArg::Str(out_port), OscArg::Int(1), OscArg::Int(64), OscArg::Int(99)],
+        |w| w.str(&out_port)?.int(1)?.int(64)?.int(99).map(drop),
     );
     std::thread::sleep(Duration::from_millis(200));
     // SAFETY: from `create`, destroyed once.
@@ -283,7 +284,7 @@ fn note_round_trip_through_ffi() {
     let events = unsafe { &*(ctx) }.events.lock().unwrap().clone();
     assert!(
         events.iter().any(|e| {
-            clockwork_midi::osc::decode(e).map(|m| m.addr) == Some(clockwork_sys!("midi/in/note_on").into())
+            Message::parse(e).is_ok_and(|m| m.address() == clockwork_sys!("midi/in/note_on"))
         }),
         "expected /clockwork/midi/in/note_on, got {} events",
         events.len()

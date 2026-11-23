@@ -25,6 +25,22 @@ pub mod stream;
 // by the transport harness to drive --shm-commands end-to-end. Not a C ABI.
 pub mod shm;
 
+/// OSC for the unit tests of the stream and the pipe.
+#[cfg(test)]
+pub(crate) mod testing {
+    use clockwork_osc::wire::{self, Message, Unwritable, Writer};
+
+    /// A message as a client would make it.
+    pub(crate) fn osc(address: &str, fill: impl FnOnce(&mut Writer<'_>) -> Result<(), Unwritable>) -> Vec<u8> {
+        wire::to_vec(1 << 17, |buf| wire::message(buf, address, fill)).unwrap()
+    }
+
+    #[cfg_attr(windows, allow(dead_code))]
+    pub(crate) fn address(packet: &[u8]) -> &str {
+        Message::parse(packet).unwrap().address()
+    }
+}
+
 #[cfg(test)]
 mod corpus {
     #[test]

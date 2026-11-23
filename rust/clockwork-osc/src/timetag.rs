@@ -199,3 +199,85 @@ mod tests {
         }
     }
 }
+
+/// Now, as an OSC 32.32 fixed-point timetag.
+///
+/// Here because this crate owns the timetag type and is the one thing both the
+/// MIDI and the sink crates already depend on — putting it in either would
+/// make the other depend on it, and clockwork-sinks already depends on clockwork-midi for
+/// its endpoint, so that edge cannot run the other way.
+///
+/// The SAME formula as `clockwork::Timetag::fromNtpSeconds(wallClockNTP())`
+/// in C++; the sinks read the clock through this one. The tests assert the
+/// two languages agree.
+#[cfg(feature = "std")]
+pub fn now_timetag() -> u64 {
+    timetag_of(std::time::SystemTime::now())
+}
+
+/// A moment of the system clock, as an OSC 32.32 timetag: what an OS's own
+/// timestamp on an event (gilrs's, a SystemTime) becomes on the wire.
+#[cfg(feature = "std")]
+pub fn timetag_of(t: std::time::SystemTime) -> u64 {
+    // Seconds between the NTP epoch (1900) and the Unix epoch (1970).
+    const NTP_EPOCH_OFFSET: u64 = 2_208_988_800;
+    let d = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let secs = d.as_secs() + NTP_EPOCH_OFFSET;
+    // 32 bits of seconds over 32 bits of fraction (RFC 5905 sec. 6).
+    let frac = ((d.subsec_nanos() as u64) << 32) / 1_000_000_000;
+    (secs << 32) | frac
+}
+
+/// How long from now until `when`, or `None` if it is already due or is
+/// immediately.
+#[cfg(feature = "std")]
+pub fn delay_until(when: Timetag) -> Option<std::time::Duration> {
+    let now = Timetag::from_ntp(now_timetag());
+    if when.is_immediate() || when <= now {
+        return None;
+    }
+    let diff = (when - now) as u64;   // positive: checked above
+    let secs = diff >> 32;
+    let nanos = (((diff & 0xFFFF_FFFF) * 1_000_000_000) >> 32) as u32;
+    Some(std::time::Duration::new(secs, nanos))
+}
+
+#[cfg(all(test, feature = "std"))]
+mod clock_tests {
+    use super::*;
+
+    #[test]
+    fn a_system_time_is_its_ntp_timetag() {
+        // A second and a half past the Unix epoch: the NTP epoch's offset in
+        // seconds, then half a second as the fraction.
+        let t = std::time::UNIX_EPOCH + std::time::Duration::from_millis(1500);
+        assert_eq!(timetag_of(t), ((2_208_988_800u64 + 1) << 32) | 0x8000_0000);
+    }
+
+    #[test]
+    fn an_immediate_sentinel_is_never_a_delay() {
+        assert!(delay_until(Timetag::from_ntp(0)).is_none());
+        assert!(delay_until(Timetag::IMMEDIATELY).is_none());
+    }
+
+    #[test]
+    fn a_past_timetag_is_due_not_negative() {
+        let now = Timetag::from_ntp(now_timetag());
+        assert!(delay_until(now - (1i64 << 32)).is_none(), "a second ago is due");
+    }
+
+    #[test]
+    fn a_future_timetag_converts_to_about_that_long() {
+        // delay_until reads the clock itself, somewhere between the two reads
+        // here: the delay is a second less however long that took — measured,
+        // so a machine that pauses moves the allowance with it.
+        let before = std::time::Instant::now();
+        let now = Timetag::from_ntp(now_timetag());
+        let d = delay_until(now + (1i64 << 32)).expect("a second out is a delay");
+        let took = before.elapsed();
+        let ms = d.as_millis();
+        let slack = 2 + took.as_millis();   // + the timetag's own rounding
+        assert!(ms <= 1000 + 2 && ms + slack >= 1000,
+                "one second less {took:?}, got {ms}ms");
+    }
+}

@@ -17,7 +17,7 @@ use gilrs::ff::{BaseEffect, BaseEffectType, Effect, EffectBuilder, Replay, Ticks
 use gilrs::{Axis, Button, EventType, GamepadId, Gilrs};
 
 use crate::io::{assign_handle, Out, Registry};
-use crate::osc::timetag_of;
+use clockwork_osc::timetag_of;
 use crate::state::{PadEvent, PadState};
 
 struct Pad {

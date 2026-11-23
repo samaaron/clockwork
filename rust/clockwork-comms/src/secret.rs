@@ -17,12 +17,15 @@
 //! nothing before it.
 
 use clockwork_osc::ffi::no_unwind;
-use clockwork_osc::{encode, OscArg};
+use clockwork_osc::wire;
 
 pub const SECRET_BYTES: usize = 32;
 
 /// The address of a client's first frame.
 pub const AUTH_ADDRESS: &str = "/clockwork/auth";
+
+/// How long that frame's packet is: the address and the secret as a blob.
+pub const AUTH_PACKET_BYTES: usize = wire::room(AUTH_ADDRESS, 1, wire::blob_room(SECRET_BYTES));
 
 /// The secret. Opaque to C; a port copies it when it starts.
 #[derive(Clone)]
@@ -43,8 +46,16 @@ impl ClockworkCommsSecret {
     }
 
     /// The packet a client sends first.
-    pub fn auth_packet(&self) -> Vec<u8> {
-        encode(AUTH_ADDRESS, &[OscArg::Blob(self.0.to_vec())])
+    pub fn auth_packet(&self) -> [u8; AUTH_PACKET_BYTES] {
+        let mut packet = [0u8; AUTH_PACKET_BYTES];
+        // The room is the packet's own length, and the address is one the
+        // codec writes. Were it ever not written, this stops here: the zeros
+        // left in `packet` must not become what `admits` compares against.
+        let written = wire::message(&mut packet, AUTH_ADDRESS, |w| w.blob(&self.0).map(drop))
+            .expect("the auth packet is written in the room it takes")
+            .len();
+        assert_eq!(written, AUTH_PACKET_BYTES, "the auth packet is as long as its room");
+        packet
     }
 
     /// Whether `packet` is exactly this secret's auth packet. Every byte is
@@ -192,7 +203,7 @@ pub unsafe extern "C" fn clockwork_comms_secret_free(secret: *mut ClockworkComms
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clockwork_osc::decode;
+    use clockwork_osc::wire::{Arg, Message};
 
     fn sample() -> ClockworkCommsSecret {
         ClockworkCommsSecret::from_bytes(std::array::from_fn(|i| i as u8)).unwrap()
@@ -217,9 +228,11 @@ mod tests {
     #[test]
     fn the_auth_packet_is_the_address_and_the_secret_as_a_blob() {
         let s = sample();
-        let m = decode(&s.auth_packet()).unwrap();
-        assert_eq!(m.addr, AUTH_ADDRESS);
-        assert_eq!(m.args, vec![OscArg::Blob(s.0.to_vec())]);
+        let packet = s.auth_packet();
+        let m = Message::parse(&packet).unwrap();
+        assert_eq!(m.address(), AUTH_ADDRESS);
+        assert!(m.args().eq([Arg::Blob(&s.0)]));
+        assert_eq!(packet.len(), 56, "the address, one tag and four bytes of size before the 32");
         assert!(s.admits(&s.auth_packet()));
     }
 
@@ -228,7 +241,7 @@ mod tests {
         let s = sample();
         let good = s.auth_packet();
         for i in 0..good.len() {
-            let mut bad = good.clone();
+            let mut bad = good;
             bad[i] ^= 1;
             assert!(!s.admits(&bad), "byte {i} flipped");
         }

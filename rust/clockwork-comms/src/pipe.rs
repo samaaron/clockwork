@@ -656,7 +656,7 @@ mod tests {
     use std::fs::OpenOptions;
     use std::io::Write;
     use std::time::Duration;
-    use clockwork_osc::encode;
+    use crate::testing::osc;
 
     fn start(cap: &Cap, name: &str) -> *mut ClockworkOscStream {
         let ctx = cap as *const Cap as *mut c_void;
@@ -692,7 +692,7 @@ mod tests {
         let before = cap.packets.lock().unwrap().len();
         let mut c = connect(name);
         c.write_all(&frame(&test_secret().auth_packet())).unwrap();
-        c.write_all(&frame(&encode("/alive", &[clockwork_osc::OscArg::Int(served as i32)]))).unwrap();
+        c.write_all(&frame(&osc("/alive", |w| w.int(served as i32).map(drop)))).unwrap();
         assert!(wait_until(|| cap.packets.lock().unwrap().len() > before), "client {served} delivered");
         drop(c);
         assert!(wait_until(|| cap.closed.lock().unwrap().len() > served), "client {served} seen closed");
@@ -753,13 +753,13 @@ mod tests {
         let h = start(&cap, &name);
         let mut c = connect(&name);
         c.write_all(&frame(&test_secret().auth_packet())).unwrap();
-        c.write_all(&frame(&encode("/hello", &[]))).unwrap();
+        c.write_all(&frame(&osc("/hello", |_| Ok(())))).unwrap();
         assert!(wait_until(|| !cap.packets.lock().unwrap().is_empty()), "the client is in");
         let id = cap.packets.lock().unwrap()[0].0;
 
         // Replies until one fails: the pipe's buffer fills, and the next
         // write waits WRITE_TIMEOUT_MS for a reader that never comes.
-        let reply = encode("/big", &[clockwork_osc::OscArg::Str("x".repeat(16 * 1024))]);
+        let reply = osc("/big", |w| w.str(&"x".repeat(16 * 1024)).map(drop));
         let mut sent = 0;
         while send(h, id, &reply) != 0 {
             sent += 1;

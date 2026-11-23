@@ -28,9 +28,9 @@
 
 use clockwork_osc::Timetag;
 
-/// Now, as an OSC timetag: `clockwork_osc::osc::now_timetag`.
+/// Now, as an OSC timetag: `clockwork_osc::now_timetag`.
 pub fn now() -> Timetag {
-    Timetag::from_ntp(clockwork_osc::osc::now_timetag())
+    Timetag::from_ntp(clockwork_osc::now_timetag())
 }
 
 /// Is a message with timetag `when` due at `now`?

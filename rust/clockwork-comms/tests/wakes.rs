@@ -17,7 +17,7 @@ use clockwork_comms::secret::ClockworkCommsSecret;
 use clockwork_comms::stream::{
     clockwork_osc_stream_port, clockwork_osc_stream_stop, clockwork_osc_tcp_start,
 };
-use clockwork_osc::encode;
+use clockwork_osc::wire;
 use clockwork_wait::testing;
 
 static PACKETS: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
@@ -56,7 +56,7 @@ fn the_accept_thread_and_a_quiet_reader_sleep_and_stopping_ends_both_at_once() {
 
     let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
     c.write_all(&frame(&secret.auth_packet())).unwrap();
-    c.write_all(&frame(&encode("/hello", &[]))).unwrap();
+    c.write_all(&frame(wire::message(&mut [0u8; 16], "/hello", |_| Ok(())).unwrap())).unwrap();
     let until = Instant::now() + Duration::from_secs(30);
     while PACKETS.lock().unwrap().is_empty() && Instant::now() < until {
         std::thread::sleep(Duration::from_millis(1));

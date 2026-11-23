@@ -6,27 +6,19 @@
 //!   * the flat twin, `"/clockwork/schedule <timetag> <blob>"`: a single
 //!     addressed inner message clockwork re-ingests when it comes due.
 //!
-//! Pure byte work. Nothing here knows what the inner blob is; it is handed
-//! back as a borrowed pointer and length and never inspected.
+//! Nothing here knows what the inner blob is; it is handed back as an offset
+//! and a length into the message and never inspected.
 //!
-//! # Every offset is derived, none is written down
-//!
-//! Hand-counted byte offsets go wrong the moment the reserved prefix changes
-//! length: the parser keeps reading, at the wrong bytes. So the constants
-//! below are computed from `clockwork_sys!("schedule")`, the one place the
-//! Rust tree spells the prefix (`clockwork-osc`). Changing the prefix moves
-//! them; nothing here needs editing, and nothing here may be replaced by a
-//! number.
+//! The flat form is read with the tree's one OSC codec (`clockwork_osc::wire`),
+//! so no byte offset is written down here, and the address is the reserved
+//! prefix's own (`clockwork_sys!("schedule")`): changing the prefix needs no
+//! edit here.
 
+use clockwork_osc::wire::{Arg, Message};
 use clockwork_osc::{clockwork_sys, Timetag};
 
 /// The flat form's address, built from the reserved prefix.
 pub const SCHEDULE_ADDR: &str = clockwork_sys!("schedule");
-
-/// Address length, NUL excluded.
-const ADDR_LEN: usize = SCHEDULE_ADDR.len();
-/// Bytes the address occupies on the wire: NUL included, padded to 4.
-const ADDR_PAD: usize = (ADDR_LEN + 4) & !3;
 
 /// The result of parsing the flat form. The blob is named by its offset into
 /// the message it was parsed from, so the result carries no pointer and no
@@ -68,68 +60,30 @@ pub fn bundle_timetag(bundle: &[u8]) -> Timetag {
 ///
 /// The timetag is an OSC timetag, as `'t'` or the int64 `'h'` (full
 /// sub-sample resolution), or, as a convenience, a `'d'`/`'f'` NTP-seconds
-/// value. Anything malformed or
-/// truncated is refused; the parser never reads past `size`.
+/// value. Anything that is not a whole OSC message
+/// ([`clockwork_osc::wire::Message::parse`]), or does not open with a time and
+/// a blob, is refused; the parser never reads past `s`.
 pub fn parse(s: &[u8]) -> Packet {
     let miss = Packet::default();
-    let size = s.len();
-    if size < ADDR_PAD + 8 {
+    let Ok(message) = Message::parse(s) else { return miss };
+    // The whole address, so "/clockwork/scheduled" is not a match.
+    if message.address() != SCHEDULE_ADDR {
         return miss;
     }
-    // The NUL is part of the check, so "/clockwork/scheduled" is not a match.
-    if &s[..ADDR_LEN] != SCHEDULE_ADDR.as_bytes() || s[ADDR_LEN] != 0 {
-        return miss;
-    }
-
-    let tt = &s[ADDR_PAD..]; // ",<t>b\0" — three bytes guaranteed by the size check
-    let mut p = ADDR_PAD + 4; // arguments start past the type tag, padded to 4
-    let end = size;
-    if tt[0] != b',' {
-        return miss;
-    }
-    let when = match tt[1] {
+    let mut args = message.args();
+    let when = match args.next() {
         // An OSC timetag, as `t` (OSC's own type) or `h` (an int64).
-        b'h' | b't' => {
-            if p + 8 > end {
-                return miss;
-            }
-            let v = be_u64(&s[p..p + 8]);
-            p += 8;
-            Timetag::from_ntp(v)
-        }
-        b'd' => {
-            if p + 8 > end {
-                return miss;
-            }
-            let v = f64::from_bits(be_u64(&s[p..p + 8]));
-            p += 8;
-            Timetag::from_ntp_seconds(v)
-        }
-        b'f' => {
-            if p + 4 > end {
-                return miss;
-            }
-            let v = f32::from_bits(be_u32(&s[p..p + 4]));
-            p += 4;
-            Timetag::from_ntp_seconds(v as f64)
-        }
+        Some(Arg::TimeTag(t)) => t,
+        Some(Arg::Long(v)) => Timetag::from_ntp(v as u64),
+        Some(Arg::Double(v)) => Timetag::from_ntp_seconds(v),
+        Some(Arg::Float(v)) => Timetag::from_ntp_seconds(f64::from(v)),
         _ => return miss,
     };
-    if tt[2] != b'b' {
-        return miss;
-    }
-    if p + 4 > end {
-        return miss;
-    }
-    let n = be_u32(&s[p..p + 4]);
-    p += 4;
-    // Checked, so a lying blob length cannot wrap into a range that looks
-    // contained, as a raw pointer comparison would.
-    match (p as u64).checked_add(n as u64) {
-        Some(e) if e <= end as u64 => {}
-        _ => return miss,
-    }
-    Packet { ok: true, when, blob_off: p, blob_len: n }
+    let Some(Arg::Blob(blob)) = args.next() else { return miss };
+    // The blob is a slice of `s`: where it begins is how far its first byte
+    // is from the message's.
+    let blob_off = blob.as_ptr() as usize - s.as_ptr() as usize;
+    Packet { ok: true, when, blob_off, blob_len: blob.len() as u32 }
 }
 
 #[inline]
@@ -141,14 +95,14 @@ fn be_u64(b: &[u8]) -> u64 {
     v
 }
 
-#[inline]
-fn be_u32(b: &[u8]) -> u32 {
-    ((b[0] as u32) << 24) | ((b[1] as u32) << 16) | ((b[2] as u32) << 8) | b[3] as u32
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Address length, NUL excluded.
+    const ADDR_LEN: usize = SCHEDULE_ADDR.len();
+    /// Bytes the address occupies on the wire: NUL included, padded to 4.
+    const ADDR_PAD: usize = (ADDR_LEN + 4) & !3;
 
     fn padded(out: &mut Vec<u8>, s: &str) {
         out.extend_from_slice(s.as_bytes());
@@ -296,6 +250,24 @@ mod tests {
             m[ADDR_PAD + 2] = t;
             assert!(!run(&m).ok);
         }
+    }
+
+    // It is a whole OSC message or it is refused: a blob carries its padding
+    // to four bytes, and what follows the blob is read as arguments too.
+    #[test]
+    fn the_message_is_held_to_osc_as_a_whole() {
+        let odd = sched_msg(",hb", &1u64.to_be_bytes(), &FILLER[..5]);
+        let r = run(&odd);
+        assert!(r.ok);
+        assert_eq!(r.blob(&odd), &FILLER[..5]);
+        assert!(!parse(&odd[..odd.len() - 3]).ok, "a blob without its padding");
+
+        let mut more = sched_msg(",hbi", &1u64.to_be_bytes(), &FILLER);
+        more.extend_from_slice(&7i32.to_be_bytes());
+        assert!(run(&more).ok, "an argument after the blob is not the scheduler's to refuse");
+        assert_eq!(run(&more).blob(&more), &FILLER);
+        let unknown = sched_msg(",hbq", &1u64.to_be_bytes(), &FILLER);
+        assert!(!run(&unknown).ok, "a type tag OSC does not have");
     }
 
     #[test]

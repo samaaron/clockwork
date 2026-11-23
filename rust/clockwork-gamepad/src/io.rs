@@ -107,9 +107,9 @@ impl Out {
     pub fn encode(&self) -> Option<Vec<u8>> {
         match self {
             Out::Button { handle, name, pressed, value, when } =>
-                Some(encode_button_at(handle, name, *pressed, *value, *when)),
+                encode_button_at(handle, name, *pressed, *value, *when).ok(),
             Out::Axis { handle, name, value, when } =>
-                Some(encode_axis_at(handle, name, *value, *when)),
+                encode_axis_at(handle, name, *value, *when).ok(),
             Out::DevicesChanged => None,
         }
     }
@@ -163,14 +163,15 @@ mod tests {
         // The web stamps each pad event with when it arrived; natively the
         // backend's moment rides on the event the same way, so a client reads
         // one shape on every host.
-        use crate::osc::{self, OscArg};
+        use clockwork_osc::wire::{Arg, Message};
         let when = 0xE000_0000_4000_0000u64;
         for out in [
             Out::from_pad_event("p", PadEvent::Button { idx: 0, pressed: true, value: 1.0 }, when),
             Out::from_pad_event("p", PadEvent::Axis { idx: 0, value: 0.5 }, when),
         ] {
-            let m = osc::decode(&out.encode().unwrap()).unwrap();
-            assert_eq!(m.args.last(), Some(&OscArg::TimeTag(when)), "{}", m.addr);
+            let bytes = out.encode().unwrap();
+            let m = Message::parse(&bytes).unwrap();
+            assert_eq!(m.args().last(), Some(Arg::TimeTag(clockwork_osc::Timetag::from_ntp(when))), "{}", m.address());
         }
         assert!(Out::DevicesChanged.encode().is_none());
     }

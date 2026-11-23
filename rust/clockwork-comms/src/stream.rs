@@ -145,7 +145,7 @@ pub(crate) fn check_auth(acc: &mut Vec<u8>, secret: &ClockworkCommsSecret) -> Ga
         return Gate::Waiting;
     }
     let len = u32::from_be_bytes([acc[0], acc[1], acc[2], acc[3]]) as usize;
-    if len != secret.auth_packet().len() {
+    if len != crate::secret::AUTH_PACKET_BYTES {
         return Gate::Refused;
     }
     if acc.len() < 4 + len {
@@ -953,7 +953,7 @@ pub(crate) mod tests {
     use std::sync::Mutex;
     use std::sync::OnceLock;
     use std::time::{Duration, Instant};
-    use clockwork_osc::{decode, encode, OscArg};
+    use crate::testing::{address, osc};
 
     // One secret for every server these cases start; `connect` presents it.
     pub(crate) fn test_secret() -> &'static ClockworkCommsSecret {
@@ -1056,7 +1056,7 @@ pub(crate) mod tests {
         let cap = Cap::new();
         let (h, port) = start_tcp_on(&cap, "");
         let mut c = connect(port);
-        c.write_all(&frame(&encode("/clockwork/status", &[]))).unwrap();
+        c.write_all(&frame(&osc("/clockwork/status", |_| Ok(())))).unwrap();
         assert!(wait_until(|| !cap.packets.lock().unwrap().is_empty()), "reachable over loopback");
         // The capture is process-wide, so ask about this socket's own address.
         assert!(!clockwork_log::capture::logged(&format!("TCP bound to 127.0.0.1:{port}")), "a loopback bind is not open");
@@ -1092,10 +1092,10 @@ pub(crate) mod tests {
         let cap = Cap::new();
         let (h, port) = start_tcp(&cap);
         let other = ClockworkCommsSecret::generate().unwrap();
-        for first in [frame(&encode("/clockwork/status", &[])), frame(&other.auth_packet())] {
+        for first in [frame(&osc("/clockwork/status", |_| Ok(()))), frame(&other.auth_packet())] {
             let mut c = connect_without_secret(port);
             c.write_all(&first).unwrap();
-            let _ = c.write_all(&frame(&encode("/after", &[])));
+            let _ = c.write_all(&frame(&osc("/after", |_| Ok(()))));
             assert!(closed_by_server(&mut c));
         }
         assert!(wait_until(|| refused(h) == 2), "both refusals counted");
@@ -1112,13 +1112,13 @@ pub(crate) mod tests {
         let (h, port) = start_tcp(&cap);
         let mut c = connect_without_secret(port);
         let mut bytes = frame(&test_secret().auth_packet());
-        bytes.extend_from_slice(&frame(&encode("/after-the-secret", &[])));
+        bytes.extend_from_slice(&frame(&osc("/after-the-secret", |_| Ok(()))));
         for piece in bytes.chunks(7) {
             c.write_all(piece).unwrap();
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(wait_until(|| cap.packets.lock().unwrap().len() == 1));
-        assert_eq!(decode(&cap.packets.lock().unwrap()[0].1).unwrap().addr, "/after-the-secret");
+        assert_eq!(address(&cap.packets.lock().unwrap()[0].1), "/after-the-secret");
         assert_eq!(refused(h), 0);
         stop(h);
     }
@@ -1171,19 +1171,19 @@ pub(crate) mod tests {
         let (h, port) = start_tcp(&cap);
         let mut c = connect(port);
 
-        let msg = encode("/clockwork/status", &[]);
+        let msg = osc("/clockwork/status", |_| Ok(()));
         c.write_all(&frame(&msg)).unwrap();
         let ok = wait_until(|| !cap.packets.lock().unwrap().is_empty());
         assert!(ok, "framed packet should be delivered");
         let (conn, bytes) = cap.packets.lock().unwrap()[0].clone();
         assert!(conn >= 1, "conn ids start at 1 (0 = in-process)");
-        assert_eq!(decode(&bytes).unwrap().addr, "/clockwork/status");
+        assert_eq!(address(&bytes), "/clockwork/status");
 
-        let reply = encode("/clockwork/status", &[OscArg::Int(1)]);
+        let reply = osc("/clockwork/status", |w| w.int(1).map(drop));
         let sent = send(h, conn, &reply);
         assert_eq!(sent, 1);
         let body = read_frame(&mut c).expect("framed reply");
-        assert_eq!(decode(&body).unwrap().addr, "/clockwork/status");
+        assert_eq!(address(&body), "/clockwork/status");
 
         stop(h);
     }
@@ -1195,7 +1195,7 @@ pub(crate) mod tests {
         let (h, port) = start_tcp(&cap);
         let mut c = connect(port);
 
-        let msg = encode("/s_new", &[OscArg::Str("sine".into()), OscArg::Int(1001)]);
+        let msg = osc("/s_new", |w| w.str("sine")?.int(1001).map(drop));
         let framed = frame(&msg);
         c.write_all(&framed[..3]).unwrap(); // mid-header
         std::thread::sleep(Duration::from_millis(150));
@@ -1205,7 +1205,7 @@ pub(crate) mod tests {
 
         let ok = wait_until(|| {
             cap.packets.lock().unwrap().iter().any(|(_, b)| {
-                decode(b).map(|m| m.addr == "/s_new").unwrap_or(false)
+                address(b) == "/s_new"
             })
         });
         assert!(ok, "split frame should reassemble into one packet");
@@ -1221,14 +1221,14 @@ pub(crate) mod tests {
         let (h, port) = start_tcp(&cap);
         let mut c = connect(port);
 
-        let mut both = frame(&encode("/one", &[]));
-        both.extend_from_slice(&frame(&encode("/two", &[])));
+        let mut both = frame(&osc("/one", |_| Ok(())));
+        both.extend_from_slice(&frame(&osc("/two", |_| Ok(()))));
         c.write_all(&both).unwrap();
 
         let ok = wait_until(|| cap.packets.lock().unwrap().len() == 2);
         assert!(ok, "both coalesced frames should arrive");
         let addrs: Vec<String> = cap.packets.lock().unwrap().iter()
-            .map(|(_, b)| decode(b).unwrap().addr).collect();
+            .map(|(_, b)| address(b).to_string()).collect();
         assert_eq!(addrs, vec!["/one", "/two"]);
 
         stop(h);
@@ -1241,15 +1241,15 @@ pub(crate) mod tests {
         let cap = Cap::new();
         let (h, port) = start_tcp(&cap);
         let mut c1 = connect(port);
-        c1.write_all(&frame(&encode("/first", &[]))).unwrap();
+        c1.write_all(&frame(&osc("/first", |_| Ok(())))).unwrap();
         assert!(wait_until(|| cap.packets.lock().unwrap().len() == 1));
 
         let mut c2 = connect(port);
-        let _ = c2.write_all(&frame(&encode("/second", &[])));
+        let _ = c2.write_all(&frame(&osc("/second", |_| Ok(()))));
         assert!(closed_by_server(&mut c2));
         assert_eq!(refused(h), 0, "the second client did present the secret");
 
-        c1.write_all(&frame(&encode("/still-first", &[]))).unwrap();
+        c1.write_all(&frame(&osc("/still-first", |_| Ok(())))).unwrap();
         assert!(wait_until(|| cap.packets.lock().unwrap().len() == 2));
         assert!(cap.packets.lock().unwrap().iter().all(|(id, _)| *id == 1));
         stop(h);
@@ -1276,7 +1276,7 @@ pub(crate) mod tests {
         assert!(wait_until(|| refused(h) == 1));
 
         let mut c = connect(port);
-        c.write_all(&frame(&encode("/in-after-the-silent", &[]))).unwrap();
+        c.write_all(&frame(&osc("/in-after-the-silent", |_| Ok(())))).unwrap();
         assert!(wait_until(|| cap.packets.lock().unwrap().len() == 1), "the client with the secret gets in");
         assert!(cap.closed.lock().unwrap().is_empty(), "the host heard of neither of the others");
         stop(h);
@@ -1290,7 +1290,7 @@ pub(crate) mod tests {
         let (h, port) = start_tcp(&cap);
 
         let mut c = connect(port);
-        c.write_all(&frame(&encode("/hello", &[]))).unwrap();
+        c.write_all(&frame(&osc("/hello", |_| Ok(())))).unwrap();
         assert!(wait_until(|| !cap.packets.lock().unwrap().is_empty()));
         let conn = cap.packets.lock().unwrap()[0].0;
 
@@ -1298,7 +1298,7 @@ pub(crate) mod tests {
         assert!(wait_until(|| cap.closed.lock().unwrap().contains(&conn)),
                 "on_closed should fire with the dropped connection's id");
 
-        let reply = encode("/late", &[]);
+        let reply = osc("/late", |_| Ok(()));
         let sent = send(h, conn, &reply);
         assert_eq!(sent, 0, "a closed conn id must not be sendable");
 
@@ -1314,13 +1314,13 @@ pub(crate) mod tests {
         let cap = Cap::new();
         let (h, port) = start_tcp(&cap);
         let mut c = connect(port);
-        c.write_all(&frame(&encode("/hello", &[]))).unwrap();
+        c.write_all(&frame(&osc("/hello", |_| Ok(())))).unwrap();
         assert!(wait_until(|| !cap.packets.lock().unwrap().is_empty()));
         let conn = cap.packets.lock().unwrap()[0].0;
 
         // Replies until one fails: the socket buffers fill, and the next
         // write waits WRITE_TIMEOUT for a reader that never comes.
-        let reply = encode("/big", &[OscArg::Str("x".repeat(60 * 1024))]);
+        let reply = osc("/big", |w| w.str(&"x".repeat(60 * 1024)).map(drop));
         let mut sent = 0;
         while send(h, conn, &reply) != 0 {
             sent += 1;
@@ -1340,7 +1340,7 @@ pub(crate) mod tests {
         let (h, port) = start_tcp(&cap);
 
         let mut c = connect(port);
-        c.write_all(&frame(&encode("/id-probe", &[]))).unwrap();
+        c.write_all(&frame(&osc("/id-probe", |_| Ok(())))).unwrap();
         assert!(wait_until(|| !cap.packets.lock().unwrap().is_empty()));
         let conn = cap.packets.lock().unwrap()[0].0;
 
@@ -1364,7 +1364,7 @@ pub(crate) mod tests {
         for _ in 0..3 {
             let mut c = connect(port);
             let before = cap.packets.lock().unwrap().len();
-            c.write_all(&frame(&encode("/again", &[]))).unwrap();
+            c.write_all(&frame(&osc("/again", |_| Ok(())))).unwrap();
             assert!(wait_until(|| cap.packets.lock().unwrap().len() > before));
             seen.push(cap.packets.lock().unwrap().last().unwrap().0);
             drop(c);
@@ -1438,7 +1438,7 @@ pub(crate) mod tests {
         let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (server_side, _) = listener.accept().unwrap();
         client.write_all(&frame(&test_secret().auth_packet())).unwrap();
-        client.write_all(&frame(&encode("/hello", &[]))).unwrap();
+        client.write_all(&frame(&osc("/hello", |_| Ok(())))).unwrap();
 
         let id = 7;
         let shared = empty_shared();
@@ -1479,7 +1479,7 @@ pub(crate) mod tests {
             shutdowns: Arc::new(AtomicU32::new(0)),
         };
         let (server, _client, ended, id) = hand_served(&cap, Box::new(failing));
-        assert!(!server.send(id, &encode("/reply", &[])), "the send fails and drops the client");
+        assert!(!server.send(id, &osc("/reply", |_| Ok(()))), "the send fails and drops the client");
         assert!(ended.recv_timeout(Duration::from_secs(30)).is_ok(),
                 "dropping the client did not end its reader");
         assert!(cap.closed.lock().unwrap().contains(&id), "the host heard the close");
@@ -1575,7 +1575,7 @@ pub(crate) mod tests {
     // correctly framed and the send can simply be retried.
     #[test]
     fn transient_write_error_keeps_the_connection() {
-        let msg = encode("/clockwork/status", &[OscArg::Int(1)]);
+        let msg = osc("/clockwork/status", |w| w.int(1).map(drop));
         let p = SendProbe::new(vec![
             Err(std::io::Error::other("ENOBUFS")),
             Ok(usize::MAX), // then the whole frame goes out
@@ -1592,7 +1592,7 @@ pub(crate) mod tests {
     // bytes already accepted must not be resent, or the peer desyncs.
     #[test]
     fn transient_mid_frame_resumes_without_duplicating() {
-        let msg = encode("/clockwork/status", &[OscArg::Int(1)]);
+        let msg = osc("/clockwork/status", |w| w.int(1).map(drop));
         let p = SendProbe::new(vec![
             Ok(6), // partial
             Err(std::io::Error::other("ENOBUFS")),
@@ -1609,7 +1609,7 @@ pub(crate) mod tests {
     // or a connection.
     #[test]
     fn interrupted_write_is_retried() {
-        let msg = encode("/clockwork/status", &[OscArg::Int(1)]);
+        let msg = osc("/clockwork/status", |w| w.int(1).map(drop));
         let p = SendProbe::new(vec![
             Ok(4),
             os_err(ErrorKind::Interrupted),
@@ -1626,7 +1626,7 @@ pub(crate) mod tests {
     // wedges the gateway thread on every subsequent send.
     #[test]
     fn stuck_client_is_evicted() {
-        let msg = encode("/clockwork/status", &[OscArg::Int(1)]);
+        let msg = osc("/clockwork/status", |w| w.int(1).map(drop));
         for kind in [ErrorKind::WouldBlock, ErrorKind::TimedOut] {
             let p = SendProbe::new(vec![os_err(kind)]);
             assert!(!p.send(&msg), "{kind:?}: send must report failure");
@@ -1639,7 +1639,7 @@ pub(crate) mod tests {
     // A dead peer, and a socket accepting nothing, are both terminal.
     #[test]
     fn broken_connection_is_evicted() {
-        let msg = encode("/clockwork/status", &[OscArg::Int(1)]);
+        let msg = osc("/clockwork/status", |w| w.int(1).map(drop));
         for steps in [vec![os_err(ErrorKind::BrokenPipe)],
                       vec![os_err(ErrorKind::ConnectionReset)],
                       vec![Ok(0)]] {
@@ -1653,7 +1653,7 @@ pub(crate) mod tests {
     // parking the gateway thread on one client indefinitely.
     #[test]
     fn endless_transient_gives_up() {
-        let msg = encode("/clockwork/status", &[OscArg::Int(1)]);
+        let msg = osc("/clockwork/status", |w| w.int(1).map(drop));
         let steps = (0..WRITE_RETRIES + 1)
             .map(|_| Err(std::io::Error::other("ENOBUFS")))
             .collect();
@@ -1677,7 +1677,7 @@ pub(crate) mod tests {
         let conn = ScriptedReader(VecDeque::from(vec![
             Ok(frame(&test_secret().auth_packet())),
             Err(std::io::Error::from(ErrorKind::Interrupted)),
-            Ok(frame(&encode("/after-eintr", &[]))),
+            Ok(frame(&osc("/after-eintr", |_| Ok(())))),
         ]));
 
         run_reader(conn, 7, empty_shared(), host, Arc::new(ReadyWait::new().unwrap())); // returns at the script's EOF
@@ -1685,7 +1685,7 @@ pub(crate) mod tests {
         let packets = cap.packets.lock().unwrap();
         assert_eq!(packets.len(), 1,
                    "an interrupted read must not drop the connection");
-        assert_eq!(decode(&packets[0].1).unwrap().addr, "/after-eintr");
+        assert_eq!(address(&packets[0].1), "/after-eintr");
     }
 
     #[test]
@@ -1734,16 +1734,16 @@ pub(crate) mod tests {
             let mut c = UnixStream::connect(&path).unwrap();
             c.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
             c.write_all(&frame(&test_secret().auth_packet())).unwrap();
-            c.write_all(&frame(&encode("/clockwork/status", &[]))).unwrap();
+            c.write_all(&frame(&osc("/clockwork/status", |_| Ok(())))).unwrap();
             assert!(wait_until(|| !cap.packets.lock().unwrap().is_empty()));
             let (conn, bytes) = cap.packets.lock().unwrap()[0].clone();
-            assert_eq!(decode(&bytes).unwrap().addr, "/clockwork/status");
+            assert_eq!(address(&bytes), "/clockwork/status");
 
-            let reply = encode("/clockwork/status", &[OscArg::Int(1)]);
+            let reply = osc("/clockwork/status", |w| w.int(1).map(drop));
             let sent = send(h, conn, &reply);
             assert_eq!(sent, 1);
             let body = read_frame(&mut c).expect("framed reply");
-            assert_eq!(decode(&body).unwrap().addr, "/clockwork/status");
+            assert_eq!(address(&body), "/clockwork/status");
 
             stop(h);
             assert!(!path.exists(), "stop should unlink the socket path");

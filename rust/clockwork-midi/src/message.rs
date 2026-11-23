@@ -333,7 +333,8 @@ pub fn exercise_in(bytes: &[u8]) {
         let _ = MidiMessage::parse(&moved.encode()).expect("a re-channelled message parses");
     }
     if let Some(osc) = crate::schema::encode_in_at("port", &msg, 0xdead_beef_0000_0001) {
-        clockwork_osc::osc::decode(&osc).expect("an inbound event encodes as a message");
+        let osc = osc.expect("an inbound event is written in the room asked for");
+        clockwork_osc::wire::Message::parse(&osc).expect("an inbound event encodes as a message");
     }
 }
 

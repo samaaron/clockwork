@@ -11,6 +11,11 @@ use crate::message::MidiMessage;
 use crate::schema::{decode_out, encode_in, encode_in_at, encode_ports, encode_ports_reply, OutCommand};
 use crate::ClockEstimator;
 
+/// A name the codec will not write (one with a NUL in it), thrown to the caller.
+fn unwritable(why: clockwork_osc::wire::Unwritable) -> JsError {
+    JsError::new(&format!("not written as OSC: {why:?}"))
+}
+
 fn port_rows(names: Vec<String>, enabled: &[u8]) -> Vec<(String, bool)> {
     names
         .into_iter()
@@ -29,8 +34,8 @@ pub fn midi_ports_reply_osc(
     ins_enabled: &[u8],
     outs: Vec<String>,
     outs_enabled: &[u8],
-) -> Vec<u8> {
-    encode_ports_reply(&port_rows(ins, ins_enabled), &port_rows(outs, outs_enabled))
+) -> Result<Vec<u8>, JsError> {
+    encode_ports_reply(&port_rows(ins, ins_enabled), &port_rows(outs, outs_enabled)).map_err(unwritable)
 }
 
 /// `/clockwork/midi/ports …` — the same payload as a push to subscribers on
@@ -41,22 +46,22 @@ pub fn midi_ports_osc(
     ins_enabled: &[u8],
     outs: Vec<String>,
     outs_enabled: &[u8],
-) -> Vec<u8> {
-    encode_ports(&port_rows(ins, ins_enabled), &port_rows(outs, outs_enabled))
+) -> Result<Vec<u8>, JsError> {
+    encode_ports(&port_rows(ins, ins_enabled), &port_rows(outs, outs_enabled)).map_err(unwritable)
 }
 
 /// Raw inbound bytes from a device → a `/clockwork/midi/in/*` OSC packet for the engine /
 /// app. Returns `None` for clock pulses (handled by the estimator instead).
 #[wasm_bindgen]
-pub fn midi_in_osc(port: &str, bytes: &[u8]) -> Option<Vec<u8>> {
-    encode_in(port, &MidiMessage::parse(bytes)?)
+pub fn midi_in_osc(port: &str, bytes: &[u8]) -> Result<Option<Vec<u8>>, JsError> {
+    MidiMessage::parse(bytes).and_then(|msg| encode_in(port, &msg)).transpose().map_err(unwritable)
 }
 
 /// [`midi_in_osc`] with the arrival time as a trailing `t` argument: an OSC
 /// timetag (a BigInt in JS), 0 for unknown.
 #[wasm_bindgen]
-pub fn midi_in_osc_at(port: &str, bytes: &[u8], when: u64) -> Option<Vec<u8>> {
-    encode_in_at(port, &MidiMessage::parse(bytes)?, when)
+pub fn midi_in_osc_at(port: &str, bytes: &[u8], when: u64) -> Result<Option<Vec<u8>>, JsError> {
+    MidiMessage::parse(bytes).and_then(|msg| encode_in_at(port, &msg, when)).transpose().map_err(unwritable)
 }
 
 /// A `/clockwork/midi/out/*` OSC packet → `[port_len:u8][port][raw midi bytes]` for the

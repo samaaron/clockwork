@@ -51,7 +51,7 @@ fn input_loopback_via_virtual_port() {
     assert!(io.enable_input(&norm, true), "open virtual input port");
 
     let expected = MidiMessage::NoteOn { channel: 1, note: 60, velocity: 100 };
-    let sent_at = clockwork_midi::osc::now_timetag();
+    let sent_at = clockwork_osc::now_timetag();
     vconn.send(&expected.encode()).unwrap();
     std::thread::sleep(Duration::from_millis(200));
 

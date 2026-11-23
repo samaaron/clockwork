@@ -198,7 +198,7 @@ impl Drop for ClockworkMidi {
 /// A time already past sends immediately rather than being dropped: late is
 /// better than silent, and the sink's `late` counter is where that is recorded.
 fn send_at_or_now(io: &mut crate::device::MidiIo, port: &str, bytes: &[u8], when: u64) {
-    match clockwork_osc::osc::delay_until(clockwork_osc::Timetag::from_ntp(when)) {
+    match clockwork_osc::delay_until(clockwork_osc::Timetag::from_ntp(when)) {
         Some(delay) if io.schedules() => { io.send_at(port, bytes, delay); }
         _ => io.send(port, bytes),
     }
@@ -267,13 +267,17 @@ impl ClockworkMidi {
 
     fn reply_ports(&self) {
         let (ins, outs) = self.midi.io.lock().unwrap().port_lists();
-        self.me.host.emit(EMIT_REPLY, &encode_ports_reply(&ins, &outs));
+        if let Ok(reply) = encode_ports_reply(&ins, &outs) {
+            self.me.host.emit(EMIT_REPLY, &reply);
+        }
     }
 
     // The ports are the process's, so every core is told.
     fn push_ports(&self) {
         let (ins, outs) = self.midi.io.lock().unwrap().port_lists();
-        emit_all(&self.midi.listeners, EMIT_BROADCAST, &encode_ports(&ins, &outs));
+        if let Ok(ports) = encode_ports(&ins, &outs) {
+            emit_all(&self.midi.listeners, EMIT_BROADCAST, &ports);
+        }
     }
 }
 
@@ -310,7 +314,7 @@ fn handle_input(listeners: &[Arc<Listener>], norm: &str, raw: &str, ts_us: u64, 
 
     // Everything else surfaces as a /clockwork/midi/in/* event for the
     // engine/clients, carrying the moment the OS stamped it, as on the web.
-    if let Some(osc) = encode_in_at(norm, &msg, when) {
+    if let Some(Ok(osc)) = encode_in_at(norm, &msg, when) {
         for l in listeners {
             l.host.emit(EMIT_BROADCAST, &osc);
         }
@@ -503,7 +507,9 @@ fn refresh_and_broadcast(listeners: &Listeners, io: &Mutex<MidiIo>) {
         if after != before { Some(after) } else { None }
     };
     if let Some((ins, outs)) = updated {
-        emit_all(listeners, EMIT_BROADCAST, &encode_ports(&ins, &outs));
+        if let Ok(ports) = encode_ports(&ins, &outs) {
+            emit_all(listeners, EMIT_BROADCAST, &ports);
+        }
     }
 }
 
@@ -529,7 +535,7 @@ pub unsafe extern "C" fn clockwork_midi_refresh(handle: *mut ClockworkMidi) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::osc::{self, OscArg};
+    use clockwork_osc::wire::{self, Arg, Message};
     use std::sync::Mutex as StdMutex;
 
     static EMITTED: StdMutex<Vec<Vec<u8>>> = StdMutex::new(Vec::new());
@@ -556,9 +562,9 @@ mod tests {
         handle_input(&[me], "keys", "Keys", 1_000_000, when, &[0x90, 60, 100]);
         let sent = EMITTED.lock().unwrap().clone();
         assert_eq!(sent.len(), 1);
-        let m = osc::decode(&sent[0]).unwrap();
-        assert_eq!(m.addr, clockwork_osc::clockwork_sys!("midi/in/note_on"));
-        assert_eq!(m.args.last(), Some(&OscArg::TimeTag(when)));
+        let m = Message::parse(&sent[0]).unwrap();
+        assert_eq!(m.address(), clockwork_osc::clockwork_sys!("midi/in/note_on"));
+        assert_eq!(m.args().last(), Some(Arg::TimeTag(clockwork_osc::Timetag::from_ntp(when))));
     }
 
     // What each core's handle was told, by core.
@@ -571,7 +577,7 @@ mod tests {
     }
 
     fn heard(core: usize, addr: &str) -> usize {
-        HEARD.lock().unwrap().iter().filter(|(c, b)| *c == core && osc::decode(b).is_some_and(|m| m.addr == addr)).count()
+        HEARD.lock().unwrap().iter().filter(|(c, b)| *c == core && Message::parse(b).is_ok_and(|m| m.address() == addr)).count()
     }
 
     // The process's MIDI is every core's (docs/ENGINES.md, suspect 9):
@@ -590,7 +596,8 @@ mod tests {
         assert_eq!((heard(1, note_on), heard(2, note_on)), (1, 1), "a note from a port reaches every core");
 
         // Closing no input at all still says what the ports are, to every core.
-        let close = osc::encode(clockwork_osc::clockwork_sys!("midi/in/enable"), &[OscArg::Str("*".into()), OscArg::Int(0)]);
+        let mut buf = [0u8; 64];
+        let close = wire::message(&mut buf, clockwork_osc::clockwork_sys!("midi/in/enable"), |w| w.str("*")?.int(0).map(drop)).unwrap();
         // SAFETY: a live handle and a readable packet.
         assert!(unsafe { clockwork_midi_handle_osc(a, close.as_ptr(), close.len() as u32) }.is_null());
         // Read while no delivery is under way: a device plugged in tells

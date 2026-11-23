@@ -20,7 +20,7 @@ use std::io::{Read, Write};
 use std::sync::atomic::{AtomicI32, AtomicI64, Ordering};
 use std::time::{Duration, Instant};
 
-use clockwork_osc::{decode, encode, OscArg};
+use clockwork_osc::wire::{self, Message};
 
 const TIMEOUT: Duration = Duration::from_secs(3);
 // Load runs blast many messages through the real engine; give it wall-clock room.
@@ -49,9 +49,9 @@ fn read_frame(r: &mut impl Read) -> std::io::Result<Vec<u8>> {
 }
 
 fn report(reply: &[u8]) {
-    match decode(reply) {
-        Some(m) => println!("OK {} ({} bytes)", m.addr, reply.len()),
-        None => println!("OK <undecodable> ({} bytes)", reply.len()),
+    match Message::parse(reply) {
+        Ok(m) => println!("OK {} ({} bytes)", m.address(), reply.len()),
+        Err(_) => println!("OK <undecodable> ({} bytes)", reply.len()),
     }
 }
 
@@ -150,16 +150,16 @@ fn progress() -> String {
 }
 
 fn sync_msg(id: i32) -> Vec<u8> {
-    encode("/clockwork/sync", &[OscArg::Int(id)])
+    wire::to_vec(32, |buf| wire::message(buf, "/clockwork/sync", |w| w.int(id).map(drop))).expect("a sync fits in 32 bytes")
 }
 
 /// The id of a `/clockwork/synced` reply, if that's what the packet is.
 fn synced_id(pkt: &[u8]) -> Option<i32> {
-    let m = decode(pkt)?;
-    if m.addr != "/clockwork/synced" {
+    let m = Message::parse(pkt).ok()?;
+    if m.address() != "/clockwork/synced" {
         return None;
     }
-    m.args.first().and_then(|a| a.as_i32())
+    m.args().next().and_then(|a| a.i32())
 }
 
 /// A bidirectional stream we can duplicate so a reader thread drains replies
@@ -413,8 +413,9 @@ fn main() {
     let secret = secret_from_stdin(&proto);
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let probe = encode("/clockwork/status", &[]);
-        let _ = tx.send(run(&proto, &target, &secret, &probe));
+        let mut probe = [0u8; 32];
+        let probe = wire::message(&mut probe, "/clockwork/status", |_| Ok(())).expect("a status fits in 32 bytes");
+        let _ = tx.send(run(&proto, &target, &secret, probe));
     });
     match rx.recv_timeout(TIMEOUT + Duration::from_secs(1)) {
         Ok(Ok(reply)) => report(&reply),

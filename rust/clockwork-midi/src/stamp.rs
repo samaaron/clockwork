@@ -62,7 +62,7 @@ pub fn now_unix_us() -> u64 {
 }
 
 fn timetag_of_unix_us(us: u64) -> u64 {
-    clockwork_osc::osc::timetag_of(UNIX_EPOCH + Duration::from_micros(us))
+    clockwork_osc::timetag_of(UNIX_EPOCH + Duration::from_micros(us))
 }
 
 #[cfg(test)]

@@ -111,7 +111,9 @@ fn deliver(cores: &Cores, registry: &Mutex<Registry>, out: &Out) {
         Some(event) => emit_all(cores, EMIT_BROADCAST, &event),
         None => {
             let rows = registry.lock().unwrap().snapshot();
-            emit_all(cores, EMIT_BROADCAST, &encode_devices(&rows));
+            if let Ok(devices) = encode_devices(&rows) {
+                emit_all(cores, EMIT_BROADCAST, &devices);
+            }
         }
     }
 }
@@ -151,13 +153,17 @@ impl ClockworkGamepad {
 
     fn reply_devices(&self) {
         let rows = global().registry.lock().unwrap().snapshot();
-        self.host.emit(EMIT_REPLY, &encode_devices_reply(&rows));
+        if let Ok(reply) = encode_devices_reply(&rows) {
+            self.host.emit(EMIT_REPLY, &reply);
+        }
     }
 
     // The pads are the process's, so every core is told.
     fn push_devices(&self) {
         let rows = global().registry.lock().unwrap().snapshot();
-        emit_all(&global().cores, EMIT_BROADCAST, &encode_devices(&rows));
+        if let Ok(devices) = encode_devices(&rows) {
+            emit_all(&global().cores, EMIT_BROADCAST, &devices);
+        }
     }
 }
 
@@ -287,7 +293,7 @@ pub unsafe extern "C" fn clockwork_gamepad_emit_devices(handle: *mut ClockworkGa
 mod tests {
     use super::*;
     use clockwork_osc::clockwork_sys;
-    use clockwork_osc::osc;
+    use clockwork_osc::wire::{self, Message};
 
     // What each core's registration was told, by core.
     static HEARD: Mutex<Vec<(usize, Vec<u8>)>> = Mutex::new(Vec::new());
@@ -299,7 +305,7 @@ mod tests {
     }
 
     fn heard(core: usize, addr: &str) -> usize {
-        HEARD.lock().unwrap().iter().filter(|(c, b)| *c == core && osc::decode(b).is_some_and(|m| m.addr == addr)).count()
+        HEARD.lock().unwrap().iter().filter(|(c, b)| *c == core && Message::parse(b).is_ok_and(|m| m.address() == addr)).count()
     }
 
     // Two cores' counts, read while no delivery is under way: the poll thread
@@ -310,7 +316,8 @@ mod tests {
     }
 
     fn refresh(from: *mut ClockworkGamepad) {
-        let verb = osc::encode(clockwork_sys!("gamepad/refresh"), &[]);
+        let mut buf = [0u8; 64];
+        let verb = wire::message(&mut buf, clockwork_sys!("gamepad/refresh"), |_| Ok(())).unwrap();
         // SAFETY: a live handle and a readable packet.
         assert!(unsafe { clockwork_gamepad_handle_osc(from, verb.as_ptr(), verb.len() as u32) }.is_null());
     }

@@ -113,7 +113,7 @@ fn boot_ticks_itself_and_reports_the_device_it_opened() {
             e.drain();
             let before = counts(&e);
             let ticks_before = before.0;
-            e.send(&clockwork_osc::encode("/dummy/ping", &[]), 0x424f_4f54).unwrap();
+            e.send(clockwork_osc::wire::message(&mut [0u8; 16], "/dummy/ping", |_| Ok(())).unwrap(), 0x424f_4f54).unwrap();
             // 15s, not 5: the slowest CI runner takes three times as long as
             // the fastest for the same job, and this waits on a device
             // callback rather than on work we are driving.

@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Clockwork-Commercial
 // Copyright (c) 2025 Sam Aaron
-//! Shared, std-only helpers for clockwork's Rust subsystems (MIDI, gamepad, OSC):
-//! a complete OSC 1.0 [`osc`] codec (messages + bundles), OSC-safe device-name
-//! [`normalize`]ation,
-//! and the native subsystems' common C-ABI scaffolding ([`ffi`]). Kept
-//! dependency-free so it builds identically for the native staticlibs and the
-//! wasm-bindgen modules.
+//! Shared helpers for clockwork's Rust subsystems (MIDI, gamepad, OSC) and for
+//! guests: the OSC 1.0 codec ([`wire`]: messages and bundles, read and written
+//! in place with no allocation), the [`Timetag`], OSC-safe device-name
+//! [`normalize`]ation, and the native subsystems' common C-ABI scaffolding
+//! ([`ffi`]). Kept dependency-free so it builds identically for the native
+//! staticlibs and the wasm-bindgen modules.
 #![forbid(unsafe_code)]
 
 #![cfg_attr(not(feature = "std"), no_std)]
@@ -41,12 +41,13 @@ use alloc::{borrow::ToOwned, boxed::Box, format, string::{String, ToString}, vec
 #[cfg(not(target_arch = "wasm32"))]
 pub mod ffi;
 pub mod normalize;
-pub mod osc;
 pub mod timetag;
+pub mod wire;
 
 pub use normalize::{assign_handle, normalize_ports, safe_osc_name, PortInfo};
-pub use osc::{decode, decode_packet, encode, encode_packet, OscArg, OscBundle, OscMessage, OscPacket};
 pub use timetag::Timetag;
+#[cfg(feature = "std")]
+pub use timetag::{delay_until, now_timetag, timetag_of};
 
 /// Why a subsystem refused one of its verbs. The engine answers it with
 /// `/clockwork/error <address> <reason> <generation>`, in the words the
@@ -72,16 +73,23 @@ impl Refusal {
     }
 }
 
-/// What the fuzzer does to bytes from the network, as a function: decode them
-/// as a message and as a packet, and check that what decodes re-encodes to
-/// itself. rust/fuzz's `osc_packet` target calls this under libFuzzer; the
+/// What the fuzzer does to bytes from the network, as a function: read them
+/// as a message and as a packet, and check that what reads is written back in
+/// no more room than it came in, and that what was written reads and writes
+/// to itself. rust/fuzz's `osc_packet` target calls this under libFuzzer; the
 /// corpus test calls it over corpus/ on every push.
 pub fn exercise(data: &[u8]) {
-    let _ = decode(data);
-    let Some(first) = decode_packet(data) else { return };
-    let once = encode_packet(&first);
-    let again = decode_packet(&once).expect("an encoded packet decodes");
-    assert_eq!(once, encode_packet(&again), "encoding is not stable");
+    let alone = wire::Message::parse(data);
+    let Ok(first) = wire::Packet::parse(data) else {
+        assert!(alone.is_err(), "a message that is no packet");
+        return;
+    };
+    assert_eq!(alone.is_ok(), matches!(first, wire::Packet::Message(_)), "a message is a packet of one");
+    let mut once = vec![0u8; data.len()];
+    let once = first.write(&mut once).expect("what was read is written where it came from");
+    let again = wire::Packet::parse(once).expect("a written packet reads");
+    let mut twice = vec![0u8; once.len()];
+    assert_eq!(again.write(&mut twice), Ok(once), "writing is not stable");
 }
 
 #[cfg(test)]

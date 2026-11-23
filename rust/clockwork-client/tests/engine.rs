@@ -23,6 +23,7 @@ use clockwork_client::{
     AUDIO_TAP_MAX_CHANNELS,
 };
 use clockwork_native::clockwork_taps;
+use clockwork_osc::wire;
 
 /// Our token: non-zero, so a reply is told from a message nobody
 /// asked for.
@@ -39,7 +40,7 @@ fn engine() -> Embed {
 }
 
 fn ping() -> Vec<u8> {
-    clockwork_osc::encode("/dummy/ping", &[])
+    wire::message(&mut [0u8; 16], "/dummy/ping", |_| Ok(())).unwrap().to_vec()
 }
 
 /// Render `blocks` whole engine blocks, which is what makes the engine act
@@ -544,7 +545,6 @@ fn an_endpoint_is_named_by_port_and_an_engine_that_is_not_there_is_not_found() {
 #[test]
 fn a_table_of_anything_is_read_directly_from_the_engines_memory() {
     use clockwork_client::params::*;
-    use clockwork_osc::OscArg;
 
     const PUMP: u32 = 10;
     const TEMPERATURE: u32 = 11;
@@ -564,10 +564,9 @@ fn a_table_of_anything_is_read_directly_from_the_engines_memory() {
 
     let e = &mut engine();
     settle(e);
-    e.send(&clockwork_osc::encode("/clockwork/param/define", &[
-        OscArg::Blob(d.entry_bytes().to_vec()),
-        OscArg::Blob(d.text().to_vec()),
-    ]), ORIGIN).unwrap();
+    let room = wire::room("/clockwork/param/define", 2, wire::blob_room(d.entry_bytes().len()) + wire::blob_room(d.text().len()));
+    let define = wire::to_vec(room, |buf| wire::message(buf, "/clockwork/param/define", |w| w.blob(d.entry_bytes())?.blob(d.text()).map(drop)));
+    e.send(&define.unwrap(), ORIGIN).unwrap();
     render_blocks(e, 1);
 
     let moved_before;
@@ -588,9 +587,7 @@ fn a_table_of_anything_is_read_directly_from_the_engines_memory() {
 
     // A set moves the value in memory: a reader sees it with no message, and the
     // facts it holds still stand.
-    e.send(&clockwork_osc::encode("/clockwork/param/set", &[
-        OscArg::Int(MODE as i32), OscArg::Float(1.0),
-    ]), ORIGIN).unwrap();
+    e.send(wire::message(&mut [0u8; 40], "/clockwork/param/set", |w| w.int(MODE as i32)?.float(1.0).map(drop)).unwrap(), ORIGIN).unwrap();
     render_blocks(e, 1);
     let client = e.client();
     let mut table = client.params().unwrap();

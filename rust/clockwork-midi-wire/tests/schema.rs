@@ -5,7 +5,9 @@
 //! bytes out, for every short message there is.
 
 use clockwork_midi::schema::{decode_out, encode_in_at, encode_ports, encode_ports_reply, OutCommand};
-use clockwork_midi::{MidiMessage, OscArg};
+use clockwork_midi::MidiMessage;
+use clockwork_osc::wire::{Message, Unwritable, Writer};
+use clockwork_osc::Timetag;
 use clockwork_midi_wire as wire;
 
 /// Every channel message: each status, with data bytes at their ends and
@@ -33,7 +35,7 @@ fn a_message_in_is_the_schemas_bytes() {
     for midi in channel_messages() {
         for when in [0u64, 0xE8F3_1234_8000_0000] {
             let msg = MidiMessage::parse(&midi).expect("a channel message");
-            let want = encode_in_at("daw", &msg, when).expect("the schema encodes it");
+            let want = encode_in_at("daw", &msg, when).expect("the schema encodes it").unwrap();
             let n = wire::encode_in("daw", &midi, when, &mut out).unwrap_or_else(|| panic!("{midi:02x?} not encoded"));
             assert_eq!(&out[..n], &want[..], "{midi:02x?} at {when:#x}");
         }
@@ -45,7 +47,7 @@ fn a_port_name_of_any_length_is_padded_as_the_schema_pads_it() {
     let mut out = [0u8; 128];
     for port in ["a", "ab", "abc", "abcd", "abcde", "iac_driver_bus_1"] {
         let msg = MidiMessage::parse(&[0x93, 60, 100]).unwrap();
-        let want = encode_in_at(port, &msg, 0).unwrap();
+        let want = encode_in_at(port, &msg, 0).unwrap().unwrap();
         let n = wire::encode_in(port, &[0x93, 60, 100], 0, &mut out).unwrap();
         assert_eq!(&out[..n], &want[..], "{port}");
     }
@@ -73,11 +75,8 @@ fn a_buffer_too_small_is_refused_and_one_exactly_big_enough_is_filled() {
     assert_eq!(&exact[..], &big[..n]);
 }
 
-fn osc(addr: &str, args: &[OscArg]) -> Vec<u8> {
-    clockwork_midi::osc::encode(addr, args)
-}
-fn s(v: &str) -> OscArg {
-    OscArg::Str(v.to_string())
+fn osc(addr: &str, fill: impl FnOnce(&mut Writer<'_>) -> Result<(), Unwritable>) -> Vec<u8> {
+    clockwork_osc::wire::to_vec(256, |buf| clockwork_osc::wire::message(buf, addr, fill)).unwrap()
 }
 
 /// The schema's reading of a send, as the bytes that go to the port and
@@ -105,31 +104,31 @@ fn a_send_out_is_the_schemas_bytes() {
     for channel in [-1, 0, 1, 2, 10, 16, 17, 200] {
         for kind in two {
             for (a, b) in [(0, 0), (60, 100), (127, 127), (128, 255), (-1, 300)] {
-                sends.push(osc(&format!("/clockwork/midi/out/{kind}"), &[s("daw"), OscArg::Int(channel), OscArg::Int(a), OscArg::Int(b)]));
+                sends.push(osc(&format!("/clockwork/midi/out/{kind}"), |w| w.str("daw")?.int(channel)?.int(a)?.int(b).map(drop)));
             }
         }
         for kind in one {
             for a in [0, 1, 64, 127, 8192, 16383, 20000, -5] {
-                sends.push(osc(&format!("/clockwork/midi/out/{kind}"), &[s("daw"), OscArg::Int(channel), OscArg::Int(a)]));
+                sends.push(osc(&format!("/clockwork/midi/out/{kind}"), |w| w.str("daw")?.int(channel)?.int(a).map(drop)));
             }
         }
     }
     for kind in ["clock", "start", "continue", "stop"] {
-        sends.push(osc(&format!("/clockwork/midi/out/{kind}"), &[s("*")]));
+        sends.push(osc(&format!("/clockwork/midi/out/{kind}"), |w| w.str("*").map(drop)));
     }
-    sends.push(osc("/clockwork/midi/out/raw", &[s("daw"), OscArg::Int(0x90), OscArg::Int(60), OscArg::Int(100)]));
-    sends.push(osc("/clockwork/midi/out/raw", &[s("daw"), OscArg::Int(0xF8)]));
+    sends.push(osc("/clockwork/midi/out/raw", |w| w.str("daw")?.int(0x90)?.int(60)?.int(100).map(drop)));
+    sends.push(osc("/clockwork/midi/out/raw", |w| w.str("daw")?.int(0xF8).map(drop)));
     // Numbers as a sender may write them, and a time at the end.
-    sends.push(osc("/clockwork/midi/out/note_on", &[s("daw"), OscArg::Float(1.0), OscArg::Float(60.0), OscArg::Float(100.0)]));
-    sends.push(osc("/clockwork/midi/out/note_on", &[s("daw"), OscArg::Int(1), OscArg::Int(60), OscArg::Int(100), OscArg::TimeTag(0xE8F3_1234_8000_0000)]));
-    sends.push(osc("/clockwork/midi/out/stop", &[s("daw"), OscArg::TimeTag(99)]));
+    sends.push(osc("/clockwork/midi/out/note_on", |w| w.str("daw")?.float(1.0)?.float(60.0)?.float(100.0).map(drop)));
+    sends.push(osc("/clockwork/midi/out/note_on", |w| w.str("daw")?.int(1)?.int(60)?.int(100)?.timetag(Timetag::from_ntp(0xE8F3_1234_8000_0000)).map(drop)));
+    sends.push(osc("/clockwork/midi/out/stop", |w| w.str("daw")?.timetag(Timetag::from_ntp(99)).map(drop)));
 
     for data in &sends {
         let (port, bytes, every, when) = schema_bytes(data).expect("the schema reads it");
-        let got = wire::decode_out(data).unwrap_or_else(|| panic!("not read: {:?}", clockwork_midi::osc::decode(data)));
+        let got = wire::decode_out(data).unwrap_or_else(|| panic!("not read: {:?}", Message::parse(data)));
         assert_eq!(got.port, port);
-        assert_eq!(&got.bytes[..got.len], &bytes[..], "{:?}", clockwork_midi::osc::decode(data));
-        assert_eq!(got.every_channel, every, "{:?}", clockwork_midi::osc::decode(data));
+        assert_eq!(&got.bytes[..got.len], &bytes[..], "{:?}", Message::parse(data));
+        assert_eq!(got.every_channel, every, "{:?}", Message::parse(data));
         assert_eq!(got.when, when);
     }
 }
@@ -137,25 +136,25 @@ fn a_send_out_is_the_schemas_bytes() {
 #[test]
 fn what_is_not_a_short_send_is_not_read() {
     let not_sends = [
-        osc("/clockwork/midi/out/enable", &[s("daw"), OscArg::Int(1)]),
-        osc("/clockwork/midi/out/sysex", &[s("daw"), OscArg::Blob(vec![0xF0, 1, 0xF7])]),
-        osc("/clockwork/midi/out/raw", &[s("daw"), OscArg::Blob(vec![0x90, 60, 100])]),
-        osc("/clockwork/midi/out/raw", &[s("daw"), OscArg::Int(0xF0), OscArg::Int(1), OscArg::Int(2), OscArg::Int(0xF7)]),
-        osc("/clockwork/midi/out/raw", &[s("daw")]),
-        osc("/clockwork/midi/out/note_on", &[s("daw"), OscArg::Int(1), OscArg::Int(60)]),
-        osc("/clockwork/midi/out/note_on", &[OscArg::Int(1), OscArg::Int(60), OscArg::Int(100)]),
-        osc("/clockwork/midi/out/nothing", &[s("daw")]),
-        osc("/clockwork/midi/in/note_on", &[s("daw"), OscArg::Int(1), OscArg::Int(60), OscArg::Int(100)]),
-        osc("/clockwork/midi/ports/list", &[]),
+        osc("/clockwork/midi/out/enable", |w| w.str("daw")?.int(1).map(drop)),
+        osc("/clockwork/midi/out/sysex", |w| w.str("daw")?.blob(&[0xF0, 1, 0xF7]).map(drop)),
+        osc("/clockwork/midi/out/raw", |w| w.str("daw")?.blob(&[0x90, 60, 100]).map(drop)),
+        osc("/clockwork/midi/out/raw", |w| w.str("daw")?.int(0xF0)?.int(1)?.int(2)?.int(0xF7).map(drop)),
+        osc("/clockwork/midi/out/raw", |w| w.str("daw").map(drop)),
+        osc("/clockwork/midi/out/note_on", |w| w.str("daw")?.int(1)?.int(60).map(drop)),
+        osc("/clockwork/midi/out/note_on", |w| w.int(1)?.int(60)?.int(100).map(drop)),
+        osc("/clockwork/midi/out/nothing", |w| w.str("daw").map(drop)),
+        osc("/clockwork/midi/in/note_on", |w| w.str("daw")?.int(1)?.int(60)?.int(100).map(drop)),
+        osc("/clockwork/midi/ports/list", |_| Ok(())),
     ];
     for data in &not_sends {
-        assert_eq!(wire::decode_out(data), None, "{:?}", clockwork_midi::osc::decode(data));
+        assert_eq!(wire::decode_out(data), None, "{:?}", Message::parse(data));
     }
 }
 
 #[test]
 fn bytes_that_are_no_message_are_not_read_and_nothing_is_read_past_their_end() {
-    let whole = osc("/clockwork/midi/out/note_on", &[s("daw"), OscArg::Int(1), OscArg::Int(60), OscArg::Int(100)]);
+    let whole = osc("/clockwork/midi/out/note_on", |w| w.str("daw")?.int(1)?.int(60)?.int(100).map(drop));
     for cut in 0..whole.len() {
         assert_eq!(wire::decode_out(&whole[..cut]), None, "cut at {cut}");
     }
@@ -163,7 +162,7 @@ fn bytes_that_are_no_message_are_not_read_and_nothing_is_read_past_their_end() {
     let mut no_tags = whole.clone();
     no_tags[28] = b'x'; // the type tags' comma
     assert_eq!(wire::decode_out(&no_tags), None);
-    let blob = osc("/clockwork/midi/out/stop", &[s("daw"), OscArg::Blob(vec![1, 2, 3])]);
+    let blob = osc("/clockwork/midi/out/stop", |w| w.str("daw")?.blob(&[1, 2, 3]).map(drop));
     let mut long_blob = blob.clone();
     let at = blob.len() - 8;
     long_blob[at..at + 4].copy_from_slice(&u32::MAX.to_be_bytes());
@@ -179,9 +178,9 @@ fn a_hosts_ports_are_the_schemas_port_list() {
         let ins = input.map(on).unwrap_or_default();
         let outs = output.map(on).unwrap_or_default();
         let n = wire::encode_ports(input, output, true, &mut out).unwrap();
-        assert_eq!(&out[..n], &encode_ports_reply(&ins, &outs)[..], "{input:?} {output:?}");
+        assert_eq!(&out[..n], &encode_ports_reply(&ins, &outs).unwrap()[..], "{input:?} {output:?}");
         let n = wire::encode_ports(input, output, false, &mut out).unwrap();
-        assert_eq!(&out[..n], &encode_ports(&ins, &outs)[..], "{input:?} {output:?}");
+        assert_eq!(&out[..n], &encode_ports(&ins, &outs).unwrap()[..], "{input:?} {output:?}");
     }
     assert_eq!(wire::encode_ports(Some("daw"), Some("daw"), true, &mut [0u8; 20]), None);
 }
@@ -202,7 +201,7 @@ fn the_corpus_reads_the_same_as_the_schema() {
         }
         let mut out = [0u8; 160];
         if let (Some(n), Some(msg)) = (wire::encode_in("p", data, 0, &mut out), MidiMessage::parse(data)) {
-            assert_eq!(Some(&out[..n]), encode_in_at("p", &msg, 0).as_deref());
+            assert_eq!(Some(&out[..n]), encode_in_at("p", &msg, 0).and_then(Result::ok).as_deref());
         }
     });
     assert!(n > 0, "no corpus under rust/clockwork-midi/corpus");

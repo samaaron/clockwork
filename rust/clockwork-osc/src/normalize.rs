@@ -13,8 +13,9 @@
 use alloc::{borrow::ToOwned, boxed::Box, format, string::{String, ToString}, vec, vec::Vec};
 
 /// Characters that are unsafe in an OSC address (or reserved by a client's
-/// `:`-delimited names) are replaced with `_`.
-const UNSAFE: &[char] = &[' ', '#', '*', ',', '/', '?', '[', ']', '{', '}', ':'];
+/// `:`-delimited names) are replaced with `_`. So is a NUL, which would end
+/// the OSC string a handle is sent as.
+const UNSAFE: &[char] = &[' ', '#', '*', ',', '/', '?', '[', ']', '{', '}', ':', '\0'];
 
 /// Normalise one raw port name: replace unsafe chars with `_`, lowercase.
 pub fn safe_osc_name(raw: &str) -> String {
@@ -79,6 +80,15 @@ mod tests {
         assert_eq!(safe_osc_name("USB Keyboard 1"), "usb_keyboard_1");
         assert_eq!(safe_osc_name("Arturia: BeatStep/Pro"), "arturia__beatstep_pro");
         assert_eq!(safe_osc_name("MIDI*Port#3"), "midi_port_3");
+    }
+
+    // A handle goes out as an OSC string, which ends at its first NUL: a name
+    // with one in it would be written cut short, or not at all.
+    #[test]
+    fn a_nul_in_a_name_is_replaced_so_a_handle_can_always_be_written() {
+        assert_eq!(safe_osc_name("Pad\0One"), "pad_one");
+        let mut buf = [0u8; 32];
+        assert!(crate::wire::message(&mut buf, "/x", |w| w.str(&safe_osc_name("\0a\0")).map(drop)).is_ok());
     }
 
     #[test]

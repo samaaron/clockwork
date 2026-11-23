@@ -202,7 +202,7 @@ impl GamepadIo {
         }
         // GameController keeps the elements' current values rather than
         // handing over events, so the moment one was seen is when it is read.
-        let when = crate::osc::now_timetag();
+        let when = clockwork_osc::now_timetag();
         for ev in events {
             out.push(Out::from_pad_event(handle, ev, when));
         }

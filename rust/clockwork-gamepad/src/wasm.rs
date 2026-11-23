@@ -14,6 +14,11 @@ use crate::schema::{
 };
 use crate::state::{axis_name, button_name, wire_name, PadState};
 
+/// A name the codec will not write (one with a NUL in it), thrown to the caller.
+fn unwritable(why: clockwork_osc::wire::Unwritable) -> JsError {
+    JsError::new(&format!("not written as OSC: {why:?}"))
+}
+
 fn device_rows(names: Vec<String>, enabled: &[u8]) -> Vec<(String, bool)> {
     names
         .into_iter()
@@ -26,15 +31,15 @@ fn device_rows(names: Vec<String>, enabled: &[u8]) -> Vec<(String, bool)> {
 /// `/clockwork/gamepad/devices/list`, in the native subsystem's exact wire
 /// form. `enabled` is 0/1 per name.
 #[wasm_bindgen]
-pub fn gamepad_devices_reply_osc(names: Vec<String>, enabled: &[u8]) -> Vec<u8> {
-    encode_devices_reply(&device_rows(names, enabled))
+pub fn gamepad_devices_reply_osc(names: Vec<String>, enabled: &[u8]) -> Result<Vec<u8>, JsError> {
+    encode_devices_reply(&device_rows(names, enabled)).map_err(unwritable)
 }
 
 /// `/clockwork/gamepad/devices …` — the same payload as a push to
 /// subscribers on a connect, disconnect or enable change.
 #[wasm_bindgen]
-pub fn gamepad_devices_osc(names: Vec<String>, enabled: &[u8]) -> Vec<u8> {
-    encode_devices(&device_rows(names, enabled))
+pub fn gamepad_devices_osc(names: Vec<String>, enabled: &[u8]) -> Result<Vec<u8>, JsError> {
+    encode_devices(&device_rows(names, enabled)).map_err(unwritable)
 }
 
 /// The W3C "standard" gamepad mapping defines exactly four axes (two sticks).
@@ -126,26 +131,26 @@ impl WasmPadState {
 /// `/clockwork/gamepad/in/button` OSC packet for the engine ingress / wire-form
 /// consumers.
 #[wasm_bindgen]
-pub fn gamepad_button_osc(pad: &str, name: &str, pressed: i32, value: f64) -> Vec<u8> {
-    encode_button(pad, name, pressed != 0, value as f32)
+pub fn gamepad_button_osc(pad: &str, name: &str, pressed: i32, value: f64) -> Result<Vec<u8>, JsError> {
+    encode_button(pad, name, pressed != 0, value as f32).map_err(unwritable)
 }
 
 /// One axis event → the `/clockwork/gamepad/in/axis` OSC packet.
 #[wasm_bindgen]
-pub fn gamepad_axis_osc(pad: &str, name: &str, value: f64) -> Vec<u8> {
-    encode_axis(pad, name, value as f32)
+pub fn gamepad_axis_osc(pad: &str, name: &str, value: f64) -> Result<Vec<u8>, JsError> {
+    encode_axis(pad, name, value as f32).map_err(unwritable)
 }
 
 /// The two above with the moment the change was seen as a trailing `t`
 /// argument: an OSC timetag (a BigInt in JS), 0 for unknown.
 #[wasm_bindgen]
-pub fn gamepad_button_osc_at(pad: &str, name: &str, pressed: i32, value: f64, when: u64) -> Vec<u8> {
-    encode_button_at(pad, name, pressed != 0, value as f32, when)
+pub fn gamepad_button_osc_at(pad: &str, name: &str, pressed: i32, value: f64, when: u64) -> Result<Vec<u8>, JsError> {
+    encode_button_at(pad, name, pressed != 0, value as f32, when).map_err(unwritable)
 }
 
 #[wasm_bindgen]
-pub fn gamepad_axis_osc_at(pad: &str, name: &str, value: f64, when: u64) -> Vec<u8> {
-    encode_axis_at(pad, name, value as f32, when)
+pub fn gamepad_axis_osc_at(pad: &str, name: &str, value: f64, when: u64) -> Result<Vec<u8>, JsError> {
+    encode_axis_at(pad, name, value as f32, when).map_err(unwritable)
 }
 
 /// A `/clockwork/gamepad/out/*` OSC packet → a flat command array for the JS layer to

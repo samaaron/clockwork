@@ -35,7 +35,8 @@ use std::time::Instant;
 
 use socket2::{Domain, Protocol, Socket, Type};
 
-use clockwork_osc::{decode, decode_packet, encode, OscArg, OscMessage, OscPacket};
+use clockwork_osc::wire::{self, Message, Packet, Unwritable};
+use clockwork_osc::Timetag;
 // Emit-callback shape + panic fence, shared across the subsystem C ABIs.
 pub use clockwork_osc::ffi::{no_unwind, EmitFn, EMIT_BROADCAST};
 
@@ -162,49 +163,43 @@ fn note_binds<'a>(core: CoreRef, what: &str, socks: impl IntoIterator<Item = &'a
 
 const CUES_EXPOSED: &str = "anyone who reaches it can send cues";
 
-// The messages in a packet, bundles flattened in order.
-fn flatten<'a>(pkt: &'a OscPacket, out: &mut Vec<&'a OscMessage>) {
-    match pkt {
-        OscPacket::Message(m) => out.push(m),
-        OscPacket::Bundle(b) => b.elements.iter().for_each(|el| flatten(el, out)),
-    }
-}
+/// How much longer than the message it carries a cue can be: its own address
+/// (20 bytes), the three type tags it adds (at most 4), the sender as text (an
+/// IPv6 address is at most 45 characters, 48 padded) and the sender's port
+/// (4). The message's address takes as a string what it took as an address.
+const CUE_ROOM: usize = 20 + 4 + 48 + 4;
 
 // One inbound message re-framed as /external-osc-cue <ip> <port> <address> <args...>.
-fn reframe(ip: &str, port: i32, m: &OscMessage) -> Vec<u8> {
-    let mut args = Vec::with_capacity(m.args.len() + 3);
-    args.push(OscArg::Str(ip.to_string()));
-    args.push(OscArg::Int(port));
-    args.push(OscArg::Str(m.addr.clone()));
-    args.extend(m.args.iter().cloned());
-    encode("/external-osc-cue", &args)
+fn reframe<'b>(buf: &'b mut [u8], ip: &str, port: i32, m: &Message<'_>) -> Result<&'b [u8], Unwritable> {
+    wire::message(buf, "/external-osc-cue", |w| {
+        w.str(ip)?.int(port)?.str(m.address())?;
+        m.args().try_for_each(|arg| w.arg(arg).map(drop))
+    })
 }
 
 /// What the fuzzer does to a datagram from anyone who can reach the cue port:
-/// decode it as the cue server does and re-frame it, from an IPv4 and an IPv6
+/// read it as the cue server does and re-frame it, from an IPv4 and an IPv6
 /// sender. Each message in it, bundles flattened in order, must come out as
-/// exactly one `/external-osc-cue` that decodes to the sender, its port, the
-/// message's address and the message's arguments, encoded as they came in.
+/// exactly one `/external-osc-cue`, no more than [`CUE_ROOM`] longer than the
+/// datagram, that reads back as the sender, its port, the message's address
+/// and the message's arguments, written as they came in.
 /// rust/fuzz's `cue_reframe` target calls this under libFuzzer; the corpus
 /// test calls it over corpus/ on every push.
 pub fn exercise(data: &[u8]) {
-    let Some(pkt) = decode_packet(data) else { return };
-    let mut messages = Vec::new();
-    flatten(&pkt, &mut messages);
-
-    for (ip, port) in [("203.0.113.7", 57120), ("2001:db8::7", 65535)] {
-        let cues: Vec<Vec<u8>> = messages.iter().map(|m| reframe(ip, port, m)).collect();
-        for (cue, m) in cues.iter().zip(&messages) {
-            let cue = decode(cue).expect("a cue decodes");
-            assert_eq!(cue.addr, "/external-osc-cue");
-            let [OscArg::Str(from), OscArg::Int(from_port), OscArg::Str(addr), args @ ..] =
-                cue.args.as_slice()
-            else {
-                panic!("a cue does not start with the sender, its port and the address");
-            };
-            assert_eq!((from.as_str(), *from_port, addr), (ip, port, &m.addr));
-            assert_eq!(encode(addr, args), encode(&m.addr, &m.args), "the arguments changed");
-        }
+    let Ok(pkt) = Packet::parse(data) else { return };
+    let mut cue = vec![0u8; data.len() + CUE_ROOM];
+    let (mut came, mut went) = (vec![0u8; data.len()], vec![0u8; data.len()]);
+    for (ip, port) in [("203.0.113.7", 57120), ("2001:db8:1234:5678:9abc:def0:1234:5678", 65535)] {
+        pkt.each_message(Timetag::IMMEDIATELY, &mut |m, _| {
+            let cue = reframe(&mut cue, ip, port, &m).expect("a cue fits in the room it is given");
+            let cue = Message::parse(cue).expect("a cue reads back");
+            assert_eq!(cue.address(), "/external-osc-cue");
+            let mut args = cue.args();
+            let head = (args.next().and_then(|a| a.str()), args.next().and_then(|a| a.i32()), args.next().and_then(|a| a.str()));
+            assert_eq!(head, (Some(ip), Some(port), Some(m.address())), "a cue starts with the sender, its port and the address");
+            let went = wire::message(&mut went, m.address(), |w| args.try_for_each(|arg| w.arg(arg).map(drop))).expect("the arguments fit where they came from");
+            assert_eq!(went, Packet::Message(m).write(&mut came).expect("the message fits where it came from"), "the arguments changed");
+        });
     }
 }
 
@@ -215,6 +210,8 @@ fn run_cue_server(socket: UdpSocket, stop: Arc<AtomicBool>, wait: Arc<ReadyWait>
         return;
     }
     let mut buf = vec![0u8; 65536];
+    // Where each cue is written: room for the longest a datagram can carry.
+    let mut cue = vec![0u8; buf.len() + CUE_ROOM];
     while !stop.load(Ordering::Acquire) {
         match socket.recv_from(&mut buf) {
             Ok((n, src)) => {
@@ -229,23 +226,29 @@ fn run_cue_server(socket: UdpSocket, stop: Arc<AtomicBool>, wait: Arc<ReadyWait>
                     cues.dropped(ip, 1);
                     continue;
                 }
-                match decode_packet(&buf[..n]) {
+                match Packet::parse(&buf[..n]) {
                     // Fence the codec/emit so a panic drops one datagram rather
                     // than silently killing the recv thread (server bound-but-deaf).
-                    Some(pkt) => no_unwind((), || {
-                        let mut messages = Vec::new();
-                        flatten(&pkt, &mut messages);
+                    Ok(pkt) => no_unwind((), || {
                         // A bundle's further messages cost one each; what the
                         // limit does not grant is dropped from the end.
-                        let total = u32::try_from(messages.len()).unwrap_or(u32::MAX);
+                        let mut total = 0u32;
+                        pkt.each_message(Timetag::IMMEDIATELY, &mut |_, _| total = total.saturating_add(1));
                         let mut granted = total.min(1);
                         if total > 1 {
                             granted += cues.limit().take(ip, now, total - 1);
                         }
                         let (ip_text, port) = (ip.to_string(), i32::from(src.port()));
-                        for m in &messages[..granted as usize] {
-                            cues.emit(&reframe(&ip_text, port, m));
-                        }
+                        let mut sent = 0u32;
+                        pkt.each_message(Timetag::IMMEDIATELY, &mut |m, _| {
+                            if sent < granted {
+                                sent += 1;
+                                // What was read is written back: it fits (CUE_ROOM).
+                                if let Ok(cue) = reframe(&mut cue, &ip_text, port, &m) {
+                                    cues.emit(cue);
+                                }
+                            }
+                        });
                         if granted < total {
                             cues.dropped(ip, total - granted);
                         }
@@ -253,7 +256,7 @@ fn run_cue_server(socket: UdpSocket, stop: Arc<AtomicBool>, wait: Arc<ReadyWait>
                     // Don't silently swallow junk — surface the first few so a
                     // misbehaving external sender is debuggable (cap to avoid a
                     // flood).
-                    None => {
+                    Err(_) => {
                         if cues.malformed_log.say() {
                             clockwork_log::log!(cues.core.ptr(), "[osc] dropped malformed inbound OSC from {ip} ({n} bytes)");
                         }
@@ -465,7 +468,7 @@ pub unsafe extern "C" fn clockwork_osc_send(
 }
 
 /// Whether `data`/`len` decodes as an OSC packet with the client parser
-/// (`clockwork_osc::decode_packet`): 1 when it does, 0 when it does not or a
+/// (`clockwork_osc::wire::Packet::parse`): 1 when it does, 0 when it does not or a
 /// pointer is null. For a test that checks every reply the engine encodes
 /// against the parser its clients read with.
 ///
@@ -479,7 +482,7 @@ pub unsafe extern "C" fn clockwork_osc_decodes(data: *const u8, len: u32) -> i32
         }
         // SAFETY: a (pointer, length) byte string, per the contract; null was refused above.
         let bytes = unsafe { slice::from_raw_parts(data, len as usize) };
-        i32::from(decode_packet(bytes).is_some())
+        i32::from(Packet::parse(bytes).is_ok())
     })
 }
 
@@ -489,7 +492,7 @@ mod tests {
     use std::net::UdpSocket;
     use std::sync::atomic::AtomicU32;
     use std::time::{Duration, Instant};
-    use clockwork_osc::{decode, encode, OscArg, OscMessage};
+    use clockwork_osc::wire::Writer;
 
     // Capture emitted /external-osc-cue packets and the dropped count via the
     // C callbacks.
@@ -531,8 +534,23 @@ mod tests {
         // SAFETY: see above.
         unsafe { clockwork_osc_destroy(h) };
     }
-    fn cues(c: &Collector) -> Vec<OscMessage> {
-        c.0.lock().unwrap().iter().filter_map(|b| decode(b)).collect()
+    // What was emitted that reads as a message.
+    fn cues(c: &Collector) -> Vec<Vec<u8>> {
+        c.0.lock().unwrap().iter().filter(|b| Message::parse(b).is_ok()).cloned().collect()
+    }
+    fn address(msg: &[u8]) -> &str {
+        Message::parse(msg).unwrap().address()
+    }
+    // A message's argument `i`, as text or as an int.
+    fn text(msg: &[u8], i: usize) -> Option<&str> {
+        Message::parse(msg).unwrap().args().nth(i)?.str()
+    }
+    fn int(msg: &[u8], i: usize) -> Option<i32> {
+        Message::parse(msg).unwrap().args().nth(i)?.i32()
+    }
+    // A message as a sender would make it.
+    fn osc(address: &str, fill: impl FnOnce(&mut Writer<'_>) -> Result<(), Unwritable>) -> Vec<u8> {
+        wire::to_vec(256, |buf| wire::message(buf, address, fill)).unwrap()
     }
 
     fn free_port() -> u16 {
@@ -588,7 +606,7 @@ mod tests {
 
         let s4 = UdpSocket::bind("127.0.0.1:0").unwrap();
         let s6 = if have_v6 { Some(UdpSocket::bind("[::1]:0").unwrap()) } else { None };
-        let msg = encode("/hello", &[OscArg::Int(42), OscArg::Str("hi".into())]);
+        let msg = osc("/hello", |w| w.int(42)?.str("hi").map(drop));
 
         let ok = wait_until(|| {
             let _ = s4.send_to(&msg, ("127.0.0.1", port));
@@ -596,18 +614,18 @@ mod tests {
                 let _ = s6.send_to(&msg, ("::1", port));
             }
             let got = cues(&collector);
-            let v4 = got.iter().any(|m| m.args.first().and_then(|a| a.as_str()) == Some("127.0.0.1"));
+            let v4 = got.iter().any(|m| text(m, 0) == Some("127.0.0.1"));
             let v6 = !have_v6
-                || got.iter().any(|m| m.args.first().and_then(|a| a.as_str()).is_some_and(|s| s.contains(':')));
+                || got.iter().any(|m| text(m, 0).is_some_and(|s| s.contains(':')));
             v4 && v6
         });
         assert!(ok, "expected inbound cues for IPv4{}", if have_v6 { " and IPv6" } else { " (no v6 here)" });
 
         // Verify the re-frame shape: /external-osc-cue <ip> <port> <addr> <args...>
-        let cue = cues(&collector).into_iter().find(|m| m.addr == "/external-osc-cue").unwrap();
-        assert_eq!(cue.args.get(2).and_then(|a| a.as_str()), Some("/hello"));
-        assert_eq!(cue.args.get(3).and_then(|a| a.as_i32()), Some(42));
-        assert_eq!(cue.args.get(4).and_then(|a| a.as_str()), Some("hi"));
+        let cue = cues(&collector).into_iter().find(|m| address(m) == "/external-osc-cue").unwrap();
+        assert_eq!(text(&cue, 2), Some("/hello"));
+        assert_eq!(int(&cue, 3), Some(42));
+        assert_eq!(text(&cue, 4), Some("hi"));
 
         destroy(h);
         drop(collector);
@@ -618,7 +636,7 @@ mod tests {
     fn outbound_ipv4_and_ipv6() {
         let collector = Collector::new();
         let h = create(&collector);
-        let inner = encode("/bar", &[OscArg::Int(7)]);
+        let inner = osc("/bar", |w| w.int(7).map(drop));
         let mut buf = [0u8; 1024];
 
         let l4 = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -626,7 +644,7 @@ mod tests {
         let p4 = l4.local_addr().unwrap().port();
         send_osc(h, "127.0.0.1", p4, &inner);
         let (n, _) = l4.recv_from(&mut buf).expect("IPv4 outbound delivery");
-        assert_eq!(decode(&buf[..n]).unwrap().addr, "/bar");
+        assert_eq!(address(&buf[..n]), "/bar");
 
         if v6_loopback_available() {
             let l6 = UdpSocket::bind("[::1]:0").unwrap();
@@ -634,9 +652,8 @@ mod tests {
             let p6 = l6.local_addr().unwrap().port();
             send_osc(h, "::1", p6, &inner);
             let (n, _) = l6.recv_from(&mut buf).expect("IPv6 outbound delivery");
-            let m = decode(&buf[..n]).unwrap();
-            assert_eq!(m.addr, "/bar");
-            assert_eq!(m.args.first().and_then(|a| a.as_i32()), Some(7));
+            assert_eq!(address(&buf[..n]), "/bar");
+            assert_eq!(int(&buf[..n], 0), Some(7));
         }
 
         destroy(h);
@@ -653,10 +670,10 @@ mod tests {
         configure(h, port, true, true);
         std::thread::sleep(Duration::from_millis(150));
 
-        let inner = encode("/selfcue", &[OscArg::Int(99)]);
+        let inner = osc("/selfcue", |w| w.int(99).map(drop));
         let ok = wait_until(|| {
             send_osc(h, "localhost", port, &inner);
-            cues(&collector).iter().any(|m| m.args.get(2).and_then(|a| a.as_str()) == Some("/selfcue"))
+            cues(&collector).iter().any(|m| text(m, 2) == Some("/selfcue"))
         });
         assert!(ok, "localhost self-loop should round-trip");
 
@@ -675,7 +692,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(150)); // recv threads bind (and drop)
 
         let s = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let msg = encode("/probe", &[OscArg::Int(1)]);
+        let msg = osc("/probe", |w| w.int(1).map(drop));
         for _ in 0..8 {
             let _ = s.send_to(&msg, ("127.0.0.1", port));
             std::thread::sleep(Duration::from_millis(50));
@@ -703,7 +720,7 @@ mod tests {
         // The first datagram a case sends arrives, not lost to a bind still
         // in progress on the recv thread.
         let s = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let probe = encode("/probe", &[]);
+        let probe = osc("/probe", |_| Ok(()));
         assert!(wait_until(|| {
             let _ = s.send_to(&probe, ("127.0.0.1", port));
             !cues(c).is_empty()
@@ -732,7 +749,7 @@ mod tests {
         let collector = Collector::new();
         let (h, port) = serving(&collector, 3, 3);
         let s = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let msg = encode("/flood", &[OscArg::Int(1)]);
+        let msg = osc("/flood", |w| w.int(1).map(drop));
         let started = Instant::now();
         for _ in 0..40 {
             s.send_to(&msg, ("127.0.0.1", port)).unwrap();
@@ -755,18 +772,19 @@ mod tests {
         let collector = Collector::new();
         let (h, port) = serving(&collector, 0, 5);
         let s = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let bundle = clockwork_osc::encode_packet(&OscPacket::Bundle(clockwork_osc::OscBundle {
-            timetag: 1,
-            elements: (0..8).map(|i| OscPacket::Message(OscMessage { addr: format!("/m{i}"), args: vec![] })).collect(),
-        }));
-        s.send_to(&bundle, ("127.0.0.1", port)).unwrap();
+        let mut buf = [0u8; 256];
+        let mut bundle = wire::BundleWriter::new(&mut buf, Timetag::IMMEDIATELY).unwrap();
+        for i in 0..8 {
+            bundle.message(&format!("/m{i}"), |_| Ok(())).unwrap();
+        }
+        s.send_to(bundle.finish(), ("127.0.0.1", port)).unwrap();
         assert!(wait_until(|| cues(&collector).len() as u32 + collector.dropped() == 8));
         let got = cues(&collector);
         assert_eq!(got.len(), 5);
         assert_eq!(collector.dropped(), 3);
         // The first five, in order.
         for (i, cue) in got.iter().enumerate() {
-            assert_eq!(cue.args.get(2).and_then(|a| a.as_str()), Some(format!("/m{i}").as_str()));
+            assert_eq!(text(cue, 2), Some(format!("/m{i}").as_str()));
         }
         destroy(h);
     }
@@ -777,7 +795,7 @@ mod tests {
         let collector = Collector::new();
         let (h, port) = serving(&collector, 0, 0);
         let s = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let msg = encode("/all", &[]);
+        let msg = osc("/all", |_| Ok(()));
         for _ in 0..200 {
             s.send_to(&msg, ("127.0.0.1", port)).unwrap();
         }

@@ -24,7 +24,7 @@ use std::ffi::c_void;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use clockwork_osc::{decode, encode, OscArg};
+use clockwork_osc::wire::{self, Message};
 
 // Medium load: 4 connections × 25k = 100k messages through the stream servers.
 const CONNS: usize = 1; // one client: a server serves one connection
@@ -33,12 +33,18 @@ const LARGE_EVERY: i32 = 500; // a ~100 KiB frame periodically, to stress reasse
 const SPLIT_EVERY: i32 = 97; // split some frames mid-wire, to stress the accumulator
 
 fn load_msg(id: i32, large: bool) -> Vec<u8> {
-    if large {
-        // Well under MAX_FRAME (256 KiB); big enough to span many read chunks.
-        encode("/l", &[OscArg::Int(id), OscArg::Str("x".repeat(100 * 1024))])
-    } else {
-        encode("/l", &[OscArg::Int(id)])
-    }
+    // Well under MAX_FRAME (256 KiB); big enough to span many read chunks.
+    let padding = if large { "x".repeat(100 * 1024) } else { String::new() };
+    wire::to_vec(64 + padding.len(), |buf| {
+        wire::message(buf, "/l", |w| {
+            w.int(id)?;
+            if large {
+                w.str(&padding)?;
+            }
+            Ok(())
+        })
+    })
+    .unwrap()
 }
 
 fn frame(pkt: &[u8]) -> Vec<u8> {
@@ -50,11 +56,11 @@ fn frame(pkt: &[u8]) -> Vec<u8> {
 
 /// Decode a load packet to its id, or `None` if it isn't a well-formed `/l i`.
 fn packet_id(osc: &[u8]) -> Option<i32> {
-    let m = decode(osc)?;
-    if m.addr != "/l" {
+    let m = Message::parse(osc).ok()?;
+    if m.address() != "/l" {
         return None;
     }
-    m.args.first().and_then(|a| a.as_i32())
+    m.args().next().and_then(|a| a.i32())
 }
 
 /// Per-source running verification: how many arrived, whether any arrived out
