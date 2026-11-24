@@ -139,44 +139,28 @@ TEST_CASE("RateSkew: a device that reports 48k and delivers 44.1k is recovered a
     REQUIRE(fix.waitForReply("/dummy/pong", r, 2000));
 }
 
-TEST_CASE("RateSkew: a device someone else holds at its own rate is adopted on the "
-          "second recovery, whatever the ratio",
-          "[RateSkew][Watchdog]") {
-    // Another app (a loopback driver's pass-through) can hold a device at its
-    // own rate. The engine reopens at its rate, the other party sets the
-    // device back, and the skew returns at a different ratio each time (the
-    // flip lands inside a window): a ratio-keyed policy sees a different
-    // fault every time, never adopts, and cold-swaps every ten seconds. The
-    // device's driver reports the held rate throughout: a report that
-    // disagrees with the session rate is the fault, whatever the ratio, and
-    // after one reopen has failed to win the device back, the reported rate
-    // is adopted.
+TEST_CASE("RateSkew: a device someone else takes to their rate while it plays is "
+          "adopted when its driver reports the change, with no watchdog verdict",
+          "[RateSkew][Watchdog][held]") {
+    // Another app (a loopback driver's pass-through) can set the rate of a
+    // device the engine is playing on. CoreAudio shares one device between
+    // its clients and the last request wins. The driver reports the change:
+    // the engine counts the device's blocks against the clock, finds them
+    // coming at the reported rate, and opens the device again at it. It
+    // does not wait for the watchdog's ten seconds of measuring, and it does
+    // not reopen at its own rate first to try to win the device back.
     auto sys = makeSimpleSystem();
     auto& speakers = sys->at("Fake Speakers");
-    speakers.heldRate = 44100.0;   // held at 44.1k elsewhere; the engine opens it at 48k
     EngineFixture fix(lyingDeviceConfig(sys));
     REQUIRE(sessionRate(fix) == 48000);
-    REQUIRE(sys->reportOpenDeviceChanged());   // the rate change, as the driver reports it
 
-    // After each reopen at 48k the other party sets the device back, and
-    // its driver reports the rate again (CoreAudio's listener fires for the
-    // other party's request as for the engine's own). Once adopted, the
-    // device is honest at 44.1k. Varying ratios are the policy's unit case;
-    // here the device keeps time at 44.1k throughout.
-    sys->useVirtualTime();
-    REQUIRE(runWatchdogUntil(fix.engine(), *sys, kPollMs, 15000, [&] {
-        sys->reportOpenDeviceChanged();
-        return sessionRate(fix) == 44100;
-    }));
-    REQUIRE(runWatchdogFor(fix.engine(), *sys, kPollMs, 2500));
-    sys->useWallTime();
+    speakers.heldRate = 44100.0;                   // taken to 44.1k elsewhere
+    REQUIRE(sys->reportOpenDeviceChanged());       // as the driver reports it
+    REQUIRE(fix.pollUntil([&] { return sessionRate(fix) == 44100; }));
     flushLog(fix);
     INFO(fix.debugMessagesDump());
 
-    // One reopen at the session rate, then the reported rate adopted: two
-    // recoveries, not a storm — and none since.
-    CHECK(fix.engine().rateSkewRecoveryCount() == 2);
-    CHECK(sessionRate(fix) == 44100);
+    CHECK(fix.engine().rateSkewRecoveryCount() == 0);
     const auto lines = fix.debugMessages();
     auto count = [&](const char* needle) {
         int n = 0;
@@ -190,6 +174,55 @@ TEST_CASE("RateSkew: a device someone else holds at its own rate is adopted on t
     OscReply r;
     fix.send(osc_test::message("/dummy/ping"));
     REQUIRE(fix.waitForReply("/dummy/pong", r, 2000));
+}
+
+TEST_CASE("RateSkew: a device held at another rate when the engine boots on it is "
+          "never played at the wrong rate",
+          "[RateSkew][Watchdog][held]") {
+    // The rate a device runs at is settled before anything is heard through
+    // it. The engine opens it at its own rate, and while it is still silent
+    // counts the blocks the device asks for against the clock: a device held
+    // at another rate asks at that rate, and its driver reports it. The
+    // engine takes the device's rate there and then, with no watchdog
+    // verdict and no seconds of sound at the wrong speed and pitch.
+    auto sys = makeSimpleSystem();
+    sys->at("Fake Speakers").heldRate = 44100.0;   // the engine asks for 48k
+    EngineFixture fix(lyingDeviceConfig(sys));
+    flushLog(fix);
+    INFO(fix.debugMessagesDump());
+
+    // (What the engine says of it at boot goes out before a client is there
+    // to hear: the switch case below holds the wording.)
+    CHECK(sessionRate(fix) == 44100);
+    CHECK(fix.engine().rateSkewRecoveryCount() == 0);
+    CHECK(fix.engine().engineState() == EngineState::Running);
+    OscReply r;
+    fix.send(osc_test::message("/dummy/ping"));
+    REQUIRE(fix.waitForReply("/dummy/pong", r, 2000));
+}
+
+TEST_CASE("RateSkew: a device held at another rate when the engine is switched to it "
+          "is never played at the wrong rate",
+          "[RateSkew][Watchdog][held]") {
+    auto sys = makeSimpleSystem();
+    sys->at("Fake Interface").heldRate = 44100.0;
+    EngineFixture fix(lyingDeviceConfig(sys));
+    REQUIRE(sessionRate(fix) == 48000);            // honest speakers
+
+    const SwapResult swap = fix.engine().switchDevice("Fake Interface", 0);
+    flushLog(fix);
+    INFO(fix.debugMessagesDump());
+
+    CHECK(swap.success);
+    CHECK(swap.sampleRate == 44100.0);             // what the caller is told is where it ended up
+    CHECK(sessionRate(fix) == 44100);
+    CHECK(fix.engine().currentDevice().name == "Fake Interface");
+    CHECK(fix.engine().rateSkewRecoveryCount() == 0);
+    int said = 0;
+    for (auto& l : fix.debugMessages())
+        if (l.find("'Fake Interface' is run at 44100 Hz") != std::string::npos) ++said;
+    CHECK(said == 1);
+    CHECK(fix.engine().engineState() == EngineState::Running);
 }
 
 TEST_CASE("RateSkew: a device that skews at the measured rate too gets no further "

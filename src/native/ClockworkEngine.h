@@ -847,6 +847,24 @@ private:
     // was opened with, it is opened again. True if it acted.
     bool reconcileOpenDevice();
 
+    // The rate the open device is run at, when that is not the rate it was
+    // opened at: its blocks counted against the clock for a third of a
+    // second, and its driver's word for its rate, the two agreeing. 0 when
+    // it runs as opened, or when nothing says otherwise for certain. Asked
+    // after every open while the engine is still silent on the device, so
+    // that nothing is ever heard at the wrong speed and pitch.
+    double rateHeldElsewhere();
+    // Open the device again at the rate it is held at, and say so once.
+    SwapResult adoptHeldRate(double heldRate);
+    // What rateHeldElsewhere found as a swap resumed its audio, for
+    // switchDevice to adopt once the swap's own bookkeeping is done; the
+    // processor stays paused, silent, until it has.
+    double mHeldRateFound = 0.0;
+    bool   mAdoptingHeldRate = false;
+    SwapResult switchDeviceAsAsked(const std::string& deviceName, double sampleRate,
+                                   int bufferSize, bool forceCold,
+                                   const std::string& inputDeviceName, SwapOrigin origin);
+
     // Close the session and make a fresh one, with nothing open. Unlike a
     // reopen (which reuses the existing CoreAudio/HAL client), this forces a
     // brand-new connection — the recovery for a hibernate-killed device where

@@ -400,15 +400,21 @@ private:
         // period AFTER each callback would add the callback's own duration
         // to every period, and the watchdog's rate-skew check (5% tolerance
         // by default) would read an honest device as slow.
-        const double tickRate = primary()->deliveredRate > 0 ? primary()->deliveredRate
-                              : primary()->heldRate > 0      ? primary()->heldRate.load()
-                                                              : mRate;
-        const double periodUs = 1e6 * mBufferSize / tickRate;
-        const auto period = std::chrono::microseconds(static_cast<int64_t>(periodUs));
+        // The rate is read again for every block: someone else can take a
+        // device that is playing to their rate (heldRate set mid-stream).
+        auto tickRateNow = [this] {
+            return primary()->deliveredRate > 0 ? primary()->deliveredRate
+                 : primary()->heldRate > 0      ? primary()->heldRate.load()
+                                                : mRate;
+        };
+        double periodUs = 1e6 * mBufferSize / tickRateNow();
+        auto period = std::chrono::microseconds(static_cast<int64_t>(periodUs));
         auto next = std::chrono::steady_clock::now();
         FakeSystem& sys = *mSystem;
         double sampleTime = 0;   // the device's own clock, from 0 as it starts
         while (mPlaying.load()) {
+            periodUs = 1e6 * mBufferSize / tickRateNow();
+            period = std::chrono::microseconds(static_cast<int64_t>(periodUs));
             // On the case's clock: wait for this block to fall due (the first
             // is due as the device joins).
             bool onCaseClock = false;

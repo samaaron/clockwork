@@ -1453,7 +1453,12 @@ void ClockworkEngine::initEngine(const Config& cfg) {
     // returns the engine is fully responsive: OSC sent via sendOSC() or UDP is
     // drained on the next audio block. A device is started on the device lane,
     // which opened it.
-    if (mDevices) runOnDeviceLane([this] { startAudioSource(); });
+    if (mDevices) runOnDeviceLane([this] {
+        // Nothing is playing yet: a device run at another rate than the
+        // boot asked for is opened at its own before anything is.
+        if (startAudioSource())
+            if (const double held = rateHeldElsewhere()) adoptHeldRate(held);
+    });
     else          startAudioSource();
 
 
@@ -3514,7 +3519,11 @@ bool ClockworkEngine::Restart::resumeAudio() {
     if (mCold) mEngine.resumeControlPass();
     mResumed = true;
     const bool delivered = mEngine.startAudioSource();
-    mEngine.mProcessor.resume();
+    // Run at another rate than it was opened at: nothing is let out at the
+    // wrong speed. The processor stays paused, and switchDevice opens the
+    // device again at its own rate.
+    mEngine.mHeldRateFound = delivered ? mEngine.rateHeldElsewhere() : 0.0;
+    if (mEngine.mHeldRateFound == 0.0) mEngine.mProcessor.resume();
     mGate.reset();
     return delivered;
 }
@@ -3534,7 +3543,82 @@ void ClockworkEngine::Restart::escalateToCold() {
     drain();
 }
 
-SwapResult ClockworkEngine::switchDevice(const std::string& rawOutputName,
+double ClockworkEngine::rateHeldElsewhere() {
+    if (mAdoptingHeldRate || !mDevices
+        || mActiveSource.load(std::memory_order_acquire) != AudioSource::RealCallback)
+        return 0.0;
+    const int session = mProcessor.nominalSampleRate();
+    const int buffer  = mProcessor.deviceBufferSize();
+    if (session <= 0 || buffer <= 0) return 0.0;
+
+    // A third of a second of the device's blocks, counted whether or not the
+    // processor is paused. A device that stops calling is not this
+    // function's to judge: a second, and nothing is said.
+    using namespace std::chrono;
+    const uint32_t want = static_cast<uint32_t>(std::max(16, session / (3 * buffer)));
+    const uint32_t first = mProcessor.processCount.value.load(std::memory_order_acquire);
+    const auto start = steady_clock::now();
+    const auto giveUp = start + seconds(1);
+    uint32_t count = first;
+    while (count - first < want && steady_clock::now() < giveUp) {
+        clockwork::wait_until(mProcessor.processCount, count, giveUp);
+        count = mProcessor.processCount.value.load(std::memory_order_acquire);
+    }
+    const double elapsed = duration<double>(steady_clock::now() - start).count();
+    if (count - first < want || elapsed <= 0.0) return 0.0;
+    const double ratio = static_cast<double>(count - first) * buffer / (elapsed * session);
+
+    // The driver's word, read after the blocks: CoreAudio reports a rate
+    // the engine has itself just set only some time later, so a report of
+    // another rate is believed only when the blocks came at that rate and
+    // not at the session's.
+    const auto live = mDevices->liveState();
+    const double reported = live.alive ? live.sampleRate : 0.0;
+    mReportedDeviceRate.store(static_cast<int>(reported > 0 ? reported : session),
+                              std::memory_order_release);
+    if (reported <= 0.0 || static_cast<int>(reported) == session) return 0.0;
+    const double held = reported / session;
+    return std::abs(ratio - held) < std::abs(ratio - 1.0) ? reported : 0.0;
+}
+
+SwapResult ClockworkEngine::adoptHeldRate(double heldRate) {
+    const auto dev = mDevices ? mDevices->current() : std::nullopt;
+    const std::string name = dev ? dev->name : std::string("audio device");
+    const int asked = mProcessor.nominalSampleRate();
+    log("[device-setup] '%s' is run at %.0f Hz by another app or the system, "
+            "not the %d Hz the engine asked for. Nothing has been played on it yet: "
+            "opening it again at %.0f Hz.",
+            name.c_str(), heldRate, asked, heldRate);
+    mAdoptingHeldRate = true;
+    SwapResult swap = reopenCurrentDevice(heldRate);
+    mAdoptingHeldRate = false;
+    // Whatever became of the reopen, the engine is not left silent.
+    if (mProcessor.isPaused()) mProcessor.resume();
+    if (swap.success)
+        log("[device-setup] session rate is now %.0f Hz (the rate the device is "
+                "run at elsewhere; the engine had opened it at %d Hz)",
+                swap.sampleRate, asked);
+    return swap;
+}
+
+SwapResult ClockworkEngine::switchDevice(const std::string& deviceName,
+                                           double sampleRate,
+                                           int bufferSize,
+                                           bool forceCold,
+                                           const std::string& inputDeviceName,
+                                           SwapOrigin origin) {
+    SwapResult result = switchDeviceAsAsked(deviceName, sampleRate, bufferSize, forceCold,
+                                            inputDeviceName, origin);
+    // The swap opened the device at the rate asked for and found it run at
+    // another (Restart::resumeAudio): still silent, it is opened at that one.
+    if (const double held = std::exchange(mHeldRateFound, 0.0)) {
+        SwapResult adopted = adoptHeldRate(held);
+        if (adopted.success) return adopted;
+    }
+    return result;
+}
+
+SwapResult ClockworkEngine::switchDeviceAsAsked(const std::string& rawOutputName,
                                            double sampleRate,
                                            int bufferSize,
                                            bool forceCold,
@@ -4801,9 +4885,17 @@ bool ClockworkEngine::reconcileOpenDevice() {
     // log.
     const int liveRate = static_cast<int>(live.sampleRate);
     if (liveRate > 0) mReportedDeviceRate.store(liveRate, std::memory_order_release);
-    if (liveRate > 0 && liveRate != mCurrentConfig.sampleRate)
+    if (liveRate > 0 && liveRate != mCurrentConfig.sampleRate) {
         log("[devices] '%s' reports %d Hz; the engine runs at %d Hz",
                 name.c_str(), liveRate, mCurrentConfig.sampleRate);
+        // Someone else has just changed the rate of the device being played
+        // on, or the report is a late one of the engine's own change: the
+        // blocks say which, and only the first is acted on.
+        if (const double held = rateHeldElsewhere()) {
+            adoptHeldRate(held);
+            return true;
+        }
+    }
 
     if (!channelsChanged) return false;
     log("[devices] '%s' now has %d out / %d in (opened with %d / %d) "
