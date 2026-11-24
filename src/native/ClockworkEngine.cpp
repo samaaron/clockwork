@@ -3594,10 +3594,12 @@ SwapResult ClockworkEngine::adoptHeldRate(double heldRate) {
     mAdoptingHeldRate = false;
     // Whatever became of the reopen, the engine is not left silent.
     if (mProcessor.isPaused()) mProcessor.resume();
-    if (swap.success)
+    if (swap.success) {
         log("[device-setup] session rate is now %.0f Hz (the rate the device is "
                 "run at elsewhere; the engine had opened it at %d Hz)",
                 swap.sampleRate, asked);
+        mRefusedRate = { name, asked, watchdogNowMs() };
+    }
     return swap;
 }
 
@@ -3607,6 +3609,28 @@ SwapResult ClockworkEngine::switchDevice(const std::string& deviceName,
                                            bool forceCold,
                                            const std::string& inputDeviceName,
                                            SwapOrigin origin) {
+    // Only its rate asked for, and that the rate this device refused a
+    // moment ago: it is held at another, and opening it twice more would
+    // end where things stand. Answered as a swap that changed nothing.
+    if (!forceCold && sampleRate > 0 && bufferSize == 0 && inputDeviceName.empty()
+        && static_cast<int>(sampleRate) == mRefusedRate.rate
+        && watchdogNowMs() - mRefusedRate.atMs < kRefusedRateMemoryMs) {
+        const auto dev = mDevices ? mDevices->current() : std::nullopt;
+        if (dev && (deviceName.empty() || clockwork::device::sameDeviceName(deviceName, dev->name))
+            && clockwork::device::sameDeviceName(mRefusedRate.device, dev->name)) {
+            log("[device-setup] '%s' refused %d Hz a moment ago (it is run at %.0f Hz "
+                    "elsewhere): not opened again", dev->name.c_str(), mRefusedRate.rate,
+                    dev->sampleRate);
+            SwapResult same;
+            same.success    = true;
+            same.deviceName = dev->name;
+            same.sampleRate = dev->sampleRate;
+            same.bufferSize = dev->bufferFrames;
+            if (onSwapEvent) onSwapEvent("swap:start", same);
+            if (onSwapEvent) onSwapEvent("swap:complete", same);
+            return same;
+        }
+    }
     SwapResult result = switchDeviceAsAsked(deviceName, sampleRate, bufferSize, forceCold,
                                             inputDeviceName, origin);
     // The swap opened the device at the rate asked for and found it run at

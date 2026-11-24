@@ -861,6 +861,15 @@ private:
     // processor stays paused, silent, until it has.
     double mHeldRateFound = 0.0;
     bool   mAdoptingHeldRate = false;
+    // The rate the device playing now has just refused, and when
+    // (watchdogNowMs): asked for again within kRefusedRateMemoryMs, the
+    // device is not opened twice more to refuse it again. A client that
+    // restores its saved rate as the engine comes up asks exactly that. The
+    // memory is short so that asking later, when whoever held the device may
+    // have let it go, is a real attempt.
+    struct RefusedRate { std::string device; int rate = 0; int64_t atMs = 0; };
+    RefusedRate mRefusedRate;
+    static constexpr int64_t kRefusedRateMemoryMs = 10000;
     SwapResult switchDeviceAsAsked(const std::string& deviceName, double sampleRate,
                                    int bufferSize, bool forceCold,
                                    const std::string& inputDeviceName, SwapOrigin origin);

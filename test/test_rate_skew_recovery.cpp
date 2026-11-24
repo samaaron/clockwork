@@ -225,6 +225,48 @@ TEST_CASE("RateSkew: a device held at another rate when the engine is switched t
     CHECK(fix.engine().engineState() == EngineState::Running);
 }
 
+TEST_CASE("RateSkew: asked again at once for the rate a device has just refused, the "
+          "engine does not open it again; asked later, it tries",
+          "[RateSkew][Watchdog][held]") {
+    // A client restoring its saved rate as the engine comes up asks for the
+    // very rate the device has just refused. Opening the device twice more
+    // (at that rate, then back) ends where things stand and delays the first
+    // sound. Asked once the memory of the refusal has lapsed, it is a real
+    // attempt: whoever held the device may have let it go.
+    auto sys = makeSimpleSystem();
+    auto& held = sys->at("Fake Interface");
+    held.heldRate = 44100.0;
+    EngineFixture fix(lyingDeviceConfig(sys));
+    REQUIRE(fix.engine().switchDevice("Fake Interface", 0).success);
+    REQUIRE(sessionRate(fix) == 44100);
+
+    // How often the engine has opened a device, by its own account.
+    auto opened = [&] {
+        flushLog(fix);
+        int n = 0;
+        for (auto& l : fix.debugMessages())
+            if (l.find("[device-setup] opening:") != std::string::npos) ++n;
+        return n;
+    };
+    const int before = opened();
+    REQUIRE(before > 0);                           // the count sees opens at all
+    const SwapResult again = fix.engine().switchDevice("Fake Interface", 48000);
+    CHECK(again.success);
+    CHECK(again.sampleRate == 44100.0);
+    CHECK(opened() == before);
+    CHECK(sessionRate(fix) == 44100);
+
+    held.heldRate = 0.0;                           // let go
+    sys->useVirtualTime();
+    REQUIRE(runWatchdogFor(fix.engine(), *sys, kPollMs, 11000));
+    sys->useWallTime();
+    const SwapResult later = fix.engine().switchDevice("Fake Interface", 48000);
+    INFO(fix.debugMessagesDump());
+    CHECK(later.success);
+    CHECK(opened() > before);
+    CHECK(sessionRate(fix) == 48000);
+}
+
 TEST_CASE("RateSkew: a device that skews at the measured rate too gets no further "
           "recoveries this session", "[RateSkew][Watchdog]") {
     auto sys = makeSimpleSystem();
