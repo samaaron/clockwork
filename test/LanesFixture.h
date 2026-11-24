@@ -127,6 +127,10 @@ uint32_t boot();
 // case that calls a lanes.h entry point that takes it.
 ClockworkCore* core();
 
+// Boot, then retire every parameter by whoever holds it: the table outlives a
+// case, so one that defines parameters starts here, whatever ran before it.
+void clearParams();
+
 // Render one block. Returns the absolute frame index of its FIRST sample, so
 // out[ch][i] corresponds to stream position (returned + i).
 uint64_t tick();

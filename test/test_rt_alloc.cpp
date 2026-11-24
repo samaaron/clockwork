@@ -124,7 +124,7 @@ TEST_CASE("rt-alloc: draining and answering OSC allocates nothing", "[rt_alloc]"
 
 // The parameter verbs read a peer's frame and answer inside the block.
 TEST_CASE("rt-alloc: the parameter verbs allocate nothing", "[rt_alloc][params]") {
-    lanes_test::boot();
+    lanes_test::clearParams();
     ClockworkParamEntry e[2] = {};
     e[0].id = 7000; e[0].kind = CLOCKWORK_PARAM_CONTINUOUS; e[0].max = 1.f; std::strcpy(e[0].name, "a");
     e[1].id = 7001; e[1].kind = CLOCKWORK_PARAM_STEPPED; e[1].max = 7.f; std::strcpy(e[1].name, "b");
@@ -173,7 +173,7 @@ TEST_CASE("rt-alloc: the parameter verbs allocate nothing", "[rt_alloc][params]"
 
 // Closing the gaps in the text happens inside a define, so inside a block.
 TEST_CASE("rt-alloc: text that has to move allocates nothing", "[rt_alloc][params]") {
-    lanes_test::boot();
+    lanes_test::clearParams();
     ClockworkParamEntry keep{}, churn{};
     keep.id = 7100; keep.kind = CLOCKWORK_PARAM_CONTINUOUS; keep.max = 1.f; std::strcpy(keep.name, "keep");
     churn.id = 7101; churn.kind = CLOCKWORK_PARAM_CONTINUOUS; churn.max = 1.f; std::strcpy(churn.name, "churn");

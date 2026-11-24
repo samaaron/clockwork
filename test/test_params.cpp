@@ -117,22 +117,7 @@ float valueOf(uint32_t id) {
     return clockwork_params_value(table(), static_cast<uint32_t>(s));
 }
 
-// Every entry retired by whoever holds it, so a case starts from an empty table.
-void clearTable() {
-    lanes_test::boot();
-    const ClockworkParamsHeader* t = table();
-    // A group goes after its members, and the deepest first: one pass per depth.
-    for (uint32_t pass = 0; pass <= CLOCKWORK_PARAM_GROUP_DEPTH; ++pass) {
-        for (uint32_t s = 0; s < t->capacity; ++s) {
-            const ClockworkParamEntry e = entryIn(t, s);
-            if (!e.live) continue;
-            const ClockworkParamEntry gone = retire(e.id);
-            clockwork_param_define(lanes_test::core(), &gone, 1, nullptr, 0, e.definer, nullptr, nullptr);
-        }
-    }
-    REQUIRE(t->count == 0);
-    lanes_test::drainRt();
-}
+void clearTable() { lanes_test::clearParams(); }
 
 ClockworkParamEntry groupEntry(uint32_t id, const char* name, uint32_t parent = 0) {
     return entry(id, name, CLOCKWORK_PARAM_GROUP, 0.f, 0.f, 0.f, CLOCKWORK_PARAM_UNIT_NONE, 0u, parent);

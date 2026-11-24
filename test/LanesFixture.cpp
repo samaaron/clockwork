@@ -14,6 +14,7 @@
 #include "guest_fence.h"       // armed here: one thread per core, so the fence can hold every region
 #include "dsp_api.h"      // DspFpEnv
 #include "OscTestUtils.h"
+#include "params/clockwork_params.h"
 
 #include <algorithm>
 #include <cstring>
@@ -225,6 +226,25 @@ ClockworkCore* core() {
     if (ClockworkCore* c = defaultLane().core()) return c;
     boot();
     return defaultLane().core();
+}
+
+void clearParams() {
+    boot();
+    const ClockworkParamsHeader* t = clockwork_params_table(core());
+    REQUIRE(t != nullptr);
+    // A group goes after its members, and the deepest first: one pass per depth.
+    for (uint32_t pass = 0; pass <= CLOCKWORK_PARAM_GROUP_DEPTH; ++pass) {
+        for (uint32_t s = 0; s < t->capacity; ++s) {
+            ClockworkParamEntry e{};
+            REQUIRE(clockwork_params_read_entry(t, s, &e) >= 0);
+            if (!e.live) continue;
+            ClockworkParamEntry gone{};
+            gone.id = e.id;
+            clockwork_param_define(core(), &gone, 1, nullptr, 0, e.definer, nullptr, nullptr);
+        }
+    }
+    REQUIRE(t->count == 0);
+    drainRt();
 }
 
 uint64_t freshDsp() {
