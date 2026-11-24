@@ -40,6 +40,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <vector>
 
 using Catch::Approx;
 
@@ -404,4 +405,51 @@ TEST_CASE("readClockworkClock snapshots the session clock coherently", "[clock]"
         REQUIRE((s.flags & SC_FLAG_LINK_ENABLED) != 0u);
         REQUIRE((s.flags & SC_FLAG_START_STOP_SYNC) != 0u);
     }
+}
+
+// ── two clocks read as one instant ───────────────────────────────────────────
+// Time here is a counter: every read of either clock costs a microsecond, and a
+// pause can be put before any read. The second clock runs kApart ahead of the
+// first, so a pair read together says so, to within the reads themselves.
+namespace {
+struct TwoClocks {
+    static constexpr int64_t kApart = 3'900'000'000'000'000;   // an NTP-sized offset, in microseconds
+    int64_t now = 1'000'000;
+    int reads = 0;
+    std::vector<int64_t> pauseBefore;                           // pauseBefore[n]: before read n, 0 when absent
+    int64_t tick() {
+        if (static_cast<size_t>(reads) < pauseBefore.size()) now += pauseBefore[static_cast<size_t>(reads)];
+        ++reads;
+        return ++now;
+    }
+    int64_t apart(const clockwork::ClocksTogether& c) const {
+        return static_cast<int64_t>(std::llround(c.secondSeconds * 1e6)) - c.firstMicros;
+    }
+    clockwork::ClocksTogether read() {
+        return clockwork::readClocksTogether([this] { return tick(); },
+                                             [this] { return static_cast<double>(tick() + kApart) * 1e-6; });
+    }
+};
+}  // namespace
+
+TEST_CASE("readClocksTogether: with no pause the two clocks are as far apart as they are",
+          "[clock_math][together]") {
+    TwoClocks c;
+    REQUIRE(std::llabs(c.apart(c.read()) - TwoClocks::kApart) <= 2);
+}
+
+TEST_CASE("readClocksTogether: a pause between the two reads does not reach the answer",
+          "[clock_math][together]") {
+    TwoClocks c;
+    c.pauseBefore = {0, 5000};                                  // five milliseconds, after the first clock is read
+    REQUIRE(std::llabs(c.apart(c.read()) - TwoClocks::kApart) <= 2);
+}
+
+TEST_CASE("readClocksTogether: paused at every try, it keeps the closest pair and stops asking",
+          "[clock_math][together]") {
+    TwoClocks c;
+    c.pauseBefore = {0, 900, 0, 0, 40, 0, 0, 700, 0, 0, 300, 0, 0, 100, 0, 0, 100, 0, 0, 100, 0, 0, 100, 0};
+    const auto pair = c.read();
+    REQUIRE(std::llabs(c.apart(pair) - TwoClocks::kApart) <= 25);   // the 40 microsecond try, halved
+    REQUIRE(c.reads <= 12);                                     // it runs on the audio thread: a few tries, no more
 }

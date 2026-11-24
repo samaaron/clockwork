@@ -126,6 +126,12 @@ struct LinkSession::Impl {
     // and local sets (via setBpm) so a client's cached tempo never goes stale.
     std::function<void(double)> appTempoCb;
 
+    // Link's clock and the wall clock, read as one instant (readClocksTogether).
+    clockwork::ClocksTogether bothClocks() const {
+        return clockwork::readClocksTogether([this] { return link.clock().micros().count(); },
+                                             [] { return wallClockNTP(); });
+    }
+
     // Mirror a new session tempo into the SAB, re-anchor beat_origin so mirror-
     // domain beatAtTime stays coherent with Link-domain beatAtTime under the new
     // tempo, then fire the app callback. Runs on Link's network thread (remote)
@@ -135,12 +141,14 @@ struct LinkSession::Impl {
         double bpm = bpmIn;
         if (!(bpm >= 1.0)) bpm = 1.0;
         auto st = link.captureAppSessionState();
-        const auto now = link.clock().micros();
-        const double currentBeat = st.beatAtTime(now, kGridQuantum);
+        // Link's beat at an instant, and that instant on the wall clock: the two
+        // clocks read together, or a pause between them moves the whole grid.
+        const clockwork::ClocksTogether now = bothClocks();
+        const double currentBeat = st.beatAtTime(std::chrono::microseconds(now.firstMicros), kGridQuantum);
         // Mirrored from Link's own beat, not re-derived from the mirror: the
         // grid Link converged on is the truth here.
         if (ClockworkClockState* s = clock.state())
-            s->setTempo(bpm, clockwork::originFor(currentBeat, wallClockNTP(), bpm));
+            s->setTempo(bpm, clockwork::originFor(currentBeat, now.secondSeconds, bpm));
         if (appTempoCb) appTempoCb(bpm);
     }
 
@@ -161,8 +169,9 @@ struct LinkSession::Impl {
         if (mirror.beat_origin_ntp == 0.0) return;
         const auto st = link.captureAppSessionState();
         if (std::fabs(st.tempo() - mirror.bpm) > 1e-6) return;
-        const double nowNtp   = wallClockNTP();
-        const double linkBeat = st.beatAtTime(link.clock().micros(), kGridQuantum);
+        const clockwork::ClocksTogether now = bothClocks();
+        const double nowNtp   = now.secondSeconds;
+        const double linkBeat = st.beatAtTime(std::chrono::microseconds(now.firstMicros), kGridQuantum);
         if (std::fabs(linkBeat - mirror.beatAt(nowNtp)) < kGridTolerance) return;
         s->setOrigin(clockwork::originFor(linkBeat, nowNtp, mirror.bpm));
     }
@@ -237,8 +246,9 @@ void LinkSession::setBpm(double bpm, double atNtpSeconds) {
     // The instant it changes (0: now), placed on Link's clock by the offset
     // between the two, sampled right now — as the start/stop callback places
     // Link's transitions on the wall clock. Link holds the beat there.
-    const double nowNtp = wallClockNTP();
-    const auto   nowLink = mImpl->link.clock().micros();
+    const clockwork::ClocksTogether now = mImpl->bothClocks();
+    const double nowNtp = now.secondSeconds;
+    const auto   nowLink = std::chrono::microseconds(now.firstMicros);
     const double at = atNtpSeconds > 0.0 ? atNtpSeconds : nowNtp;
     const auto   atLink = nowLink + std::chrono::microseconds(static_cast<int64_t>((at - nowNtp) * 1e6));
     auto st = mImpl->link.captureAppSessionState();
@@ -301,8 +311,9 @@ uint32_t LinkSession::followHost(const clockwork::HostWord& said, double atNtpSe
     // Link's clock (the offset between the two sampled now, as setBpm's is),
     // through the audio thread's session state: no lock.
     const ClockworkClockSnapshot now = readClockworkClock(s);
-    const auto atLink = mImpl->link.clock().micros()
-                      + std::chrono::microseconds(static_cast<int64_t>((atNtpSeconds - wallClockNTP()) * 1e6));
+    const clockwork::ClocksTogether both = mImpl->bothClocks();
+    const auto atLink = std::chrono::microseconds(both.firstMicros)
+                      + std::chrono::microseconds(static_cast<int64_t>((atNtpSeconds - both.secondSeconds) * 1e6));
     auto st = mImpl->link.captureAudioSessionState();
     if (moved & clockwork::kHostMovedTempo) st.setTempo(now.bpm, atLink);
     if (moved & clockwork::kHostMovedGrid)
@@ -499,8 +510,8 @@ void LinkSession::setStartStopChangedCallback(std::function<void(bool, double)> 
             // this thread. The state and the broadcast then carry one time.
             const int64_t atLink = impl->link.captureAppSessionState()
                                              .timeForIsPlaying().count();
-            const int64_t nowLink = impl->link.clock().micros().count();
-            const double atNtp = wallClockNTP() + static_cast<double>(atLink - nowLink) * 1e-6;
+            const clockwork::ClocksTogether now = impl->bothClocks();
+            const double atNtp = now.secondSeconds + static_cast<double>(atLink - now.firstMicros) * 1e-6;
             if (ClockworkClockState* s = impl->clock.state()) s->setTransport(playing, atNtp);
             if (cb) cb(playing, atNtp);
         });

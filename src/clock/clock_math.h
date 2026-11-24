@@ -122,6 +122,37 @@ inline double monotonicSeconds() {
 
 namespace clockwork {
 
+// Two clocks read as one instant: `first` in microseconds, `second` in seconds.
+// Anything that moves a time from one clock to the other needs the two read
+// together, and two plain reads are not: a thread paused between them puts the
+// length of the pause into the answer.
+struct ClocksTogether {
+    int64_t firstMicros;
+    double  secondSeconds;
+};
+//
+// So the first clock is read on both sides of the second. The second's reading
+// belongs to the middle of the two, and how far apart they are says how well: a
+// pause shows as a wide gap, and the read is taken again. It keeps the closest
+// of a few tries and never waits, so the audio thread may call it.
+template <class First, class Second>
+ClocksTogether readClocksTogether(First&& first, Second&& second) {
+    constexpr int     kTries = 4;
+    constexpr int64_t kCloseMicros = 20;
+    ClocksTogether best{0, 0.0};
+    int64_t bestGap = INT64_MAX;
+    for (int i = 0; i < kTries && bestGap > kCloseMicros; ++i) {
+        const int64_t before = first();
+        const double  between = second();
+        const int64_t gap = first() - before;
+        if (gap < bestGap) {
+            bestGap = gap;
+            best = {before + gap / 2, between};
+        }
+    }
+    return best;
+}
+
 // Non-negative phase of `beat` within `quantum` (0 when quantum <= 0).
 inline double wrapPhase(double beat, double quantum) {
     if (quantum <= 0.0) return 0.0;
