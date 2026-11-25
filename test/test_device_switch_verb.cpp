@@ -337,3 +337,31 @@ TEST_CASE("InputsVerb: turning inputs on for an eight-input interface opens all 
     CHECK(on.argInt(1) == -1);
     CHECK(fix.engine().currentDevice().activeInputChannels == 8);
 }
+
+TEST_CASE("SwitchVerb: switch.done says the rate and buffer the engine ended up at, "
+          "which need not be the rate asked for", "[SwitchVerb]") {
+    // A client saves its user's rate from switch.done, as it does the output.
+    // A device held at another rate refuses the one asked for, and the engine
+    // settles on the device's: a client that saved what it asked for would ask
+    // again at every launch, and change the device's rate under whoever holds
+    // it each time.
+    auto sys = makeSimpleSystem();
+    sys->at("Fake Interface").heldRate = 44100.0;
+    EngineFixture fix(fakeEngineConfig(sys, "Fake Speakers"));
+    subscribe(fix);
+
+    osc_test::Builder ask;
+    ask.begin(CLOCKWORK_SYS("devices/switch"))
+        << "Fake Interface" << 48000.0f << static_cast<osc::int32>(0) << "";
+    fix.send(ask.end());
+    const bool done = fix.pollUntil([&] { return !switchDones(fix).empty(); }, 10000);
+    INFO(fix.debugMessagesDump());
+    REQUIRE(done);
+    const auto d = switchDones(fix).back();
+    CHECK(d.argInt(0) == 1);
+    CHECK(d.argString(3) == "Fake Interface");
+    REQUIRE(d.argCount() == 10);
+    CHECK(d.argInt(8) == 44100);
+    CHECK(d.argInt(9) > 0);
+}
+

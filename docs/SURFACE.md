@@ -153,11 +153,14 @@ with `devices/switch.reply 1` — heard, nothing more — and ends in exactly on
 lifecycle (`/clockwork/notify`):
 
     success, requestedOutput, requestedInput, actualOutput, actualInput,
-    error, inputUnavailable, inputUnavailableReason
+    error, inputUnavailable, inputUnavailableReason, sampleRate, bufferSize
 
 `actualOutput` is where the engine is when it is over, whether or not the
 switch succeeded; a client records its user's choice from this, and only
-from this. The output `__system__`, or the device table's default-follow row
+from this. `sampleRate` and `bufferSize` are likewise what the engine is at,
+not what was asked for: a device held at another rate by another program
+refuses the one asked for, and a client that saved its own request would ask
+again at every launch. The output `__system__`, or the device table's default-follow row
 by name, means "follow the system default" — and following it is not
 choosing it: nothing is pinned, so the engine follows the next move too.
 On a driver with no default (ASIO) it moves to a driver with one: the one it

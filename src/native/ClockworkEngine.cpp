@@ -2552,6 +2552,8 @@ void ClockworkEngine::sendSwitchDone(const SwapResult& result,
     //   error(str),                  ← top-level error, "" on success
     //   inputUnavailable(int32),     ← 1 = output opened, input fell back
     //   inputUnavailableReason(str)  ← the driver's words, "" otherwise
+    //   sampleRate(int32),           ← the rate and buffer the engine is at
+    //   bufferSize(int32)              now, which need not be those asked for
     const OscPacket packet = oscPacketOf(2048, [&](osc::OutboundPacketStream& s) {
         s << osc::BeginMessage(CLOCKWORK_SYS("devices/switch.done"))
           << static_cast<osc::int32>(result.success ? 1 : 0)
@@ -2562,6 +2564,8 @@ void ClockworkEngine::sendSwitchDone(const SwapResult& result,
           << result.error.c_str()
           << static_cast<osc::int32>(result.inputUnavailable ? 1 : 0)
           << result.inputUnavailableReason.c_str()
+          << static_cast<osc::int32>(result.sampleRate)
+          << static_cast<osc::int32>(result.bufferSize)
           << osc::EndMessage;
     });
     mEgress.broadcastToTargets(packet.ptr(), packet.size());
